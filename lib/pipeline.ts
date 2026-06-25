@@ -229,7 +229,7 @@ function locateAndRead(
   anchors: { required: string[]; optional: string[] },
   label: string,
   warnings: string[],
-): { rows: Row[]; sheetName: string; headerRow: number } {
+): { rows: Row[]; sheetName: string; headerRow: number; matrix: unknown[][] } {
   const wb = readWorkbook(buffer)
   const allAnchors = [...anchors.required, ...anchors.optional]
 
@@ -264,25 +264,49 @@ function locateAndRead(
     raw: false,
     range: best.headerRow,
   })
-  return { rows, sheetName: best.name, headerRow: best.headerRow }
+  // Raw matrix (blank rows preserved) so callers can map records to true Excel row numbers.
+  const matrix = sheetToMatrix(wb.Sheets[best.name])
+  return { rows, sheetName: best.name, headerRow: best.headerRow, matrix }
 }
 
-/** Detect a Qualtrics metadata row (the `{"ImportId":...}` row beneath headers). */
-function looksLikeQualtricsMeta(r: Row): boolean {
-  for (const v of Object.values(r)) {
-    const s = String(v ?? "")
-    if (s.includes("ImportId") || s.trimStart().startsWith('{"')) return true
-  }
-  return false
-}
+/**
+ * Build data records from the raw matrix while preserving each record's TRUE
+ * spreadsheet row number (1-based). Per the source-file structure:
+ *   • the detected header sits on its row (normally Excel row 2),
+ *   • the single row directly beneath it (normally Excel row 3) is always
+ *     metadata or blank and is skipped — it is never a data record, and
+ *   • real data begins on the next row (normally Excel row 4).
+ * Fully-blank data rows are skipped, but numbering stays exact because it is
+ * derived from the matrix index, not the position within the emitted list.
+ */
+function buildPositionedRows(
+  matrix: unknown[][],
+  headerRow: number,
+  label: string,
+  warnings: string[],
+): Array<{ row: Row; excelRow: number }> {
+  const headers = (matrix[headerRow] ?? []).map((h) => String(h ?? "").trim())
+  const metaRowIdx = headerRow + 1 // the "row 3" metadata/blank row — always skipped
+  const firstDataIdx = headerRow + 2 // the "row 4" first real data record
 
-/** Drop the leading Qualtrics metadata row only if it is actually present. */
-function dropQualtricsMeta(rows: Row[], label: string, warnings: string[]): Row[] {
-  if (rows.length > 0 && looksLikeQualtricsMeta(rows[0])) {
-    warnings.push(`${label}: dropped Qualtrics metadata row.`)
-    return rows.slice(1)
+  if (matrix.length > metaRowIdx) {
+    warnings.push(`${label}: skipped row ${metaRowIdx + 1} (metadata/blank); data linked from row ${firstDataIdx + 1}.`)
   }
-  return rows
+
+  const out: Array<{ row: Row; excelRow: number }> = []
+  for (let mi = firstDataIdx; mi < matrix.length; mi++) {
+    const cells = matrix[mi] ?? []
+    const isBlankRow = cells.every((c) => c === null || c === undefined || String(c).trim() === "")
+    if (isBlankRow) continue
+    const row: Row = {}
+    for (let ci = 0; ci < headers.length; ci++) {
+      const key = headers[ci]
+      if (!key) continue // skip unnamed columns
+      if (!(key in row)) row[key] = cells[ci] ?? null
+    }
+    out.push({ row, excelRow: mi + 1 }) // mi is 0-based; +1 = true 1-based Excel row
+  }
+  return out
 }
 
 /**
@@ -291,15 +315,15 @@ function dropQualtricsMeta(rows: Row[], label: string, warnings: string[]): Row[
  * - The Qualtrics metadata row beneath the header is dropped only if present.
  */
 function loadSurvey(buffer: ArrayBuffer, sourceTag: string, refLabel: string, warnings: string[]): Row[] {
-  const { rows } = locateAndRead(buffer, SHEET_ANCHORS.survey, "Survey", warnings)
-  const data = dropQualtricsMeta(rows, "Survey", warnings)
-  return data.map((r, i) => ({
-    ...r,
-    [COLS.ECODE]: standardizeEcode(r[COLS.ECODE]),
+  const { headerRow, matrix } = locateAndRead(buffer, SHEET_ANCHORS.survey, "Survey", warnings)
+  const positioned = buildPositionedRows(matrix, headerRow, refLabel, warnings)
+  return positioned.map(({ row, excelRow }) => ({
+    ...row,
+    [COLS.ECODE]: standardizeEcode(row[COLS.ECODE]),
     _source: sourceTag,
-    // Source file + row number, used to locate the original record in the audit drill-down.
+    // Source file + TRUE spreadsheet row number, to locate the record in the audit drill-down.
     _srcFile: refLabel,
-    _srcRow: i + 1,
+    _srcRow: excelRow,
   }))
 }
 
@@ -309,11 +333,11 @@ function loadSurvey(buffer: ArrayBuffer, sourceTag: string, refLabel: string, wa
  * - Primary key "Cleaned Ecode" is renamed to "Ecode" for joining.
  */
 function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): Row[] {
-  const { rows } = locateAndRead(buffer, SHEET_ANCHORS.ei, "Exit Interview", warnings)
-  const data = dropQualtricsMeta(rows, "Exit Interview", warnings)
+  const { headerRow, matrix } = locateAndRead(buffer, SHEET_ANCHORS.ei, "Exit Interview", warnings)
+  const positioned = buildPositionedRows(matrix, headerRow, "Exit Interview", warnings)
 
-  return data.map((r, i) => {
-    const cleaned = { ...r }
+  return positioned.map(({ row, excelRow }) => {
+    const cleaned = { ...row }
     // Rename "Cleaned Ecode" → "Ecode" for joining
     if (COLS.EI_CLEANED_ECODE in cleaned) {
       cleaned[COLS.ECODE] = standardizeEcode(cleaned[COLS.EI_CLEANED_ECODE])
@@ -321,7 +345,7 @@ function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): Row[] {
     }
     cleaned._source = "exit_interview"
     cleaned._srcFile = "Exit Interview"
-    cleaned._srcRow = i + 1
+    cleaned._srcRow = excelRow
     return cleaned
   })
 }
