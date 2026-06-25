@@ -108,6 +108,15 @@ function fmt(n: number): string {
   return n.toLocaleString()
 }
 
+// Builds "departure_data_cleaned_YYYY-MM-DD" using the user's local date.
+function exportBaseName(): string {
+  const now = new Date()
+  const yyyy = now.getFullYear()
+  const mm = String(now.getMonth() + 1).padStart(2, "0")
+  const dd = String(now.getDate()).padStart(2, "0")
+  return `departure_data_cleaned_${yyyy}-${mm}-${dd}`
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 export default function PipelinePage() {
   const [files, setFiles] = useState<Record<string, File | null>>({})
@@ -153,13 +162,13 @@ export default function PipelinePage() {
   const handleDownloadXLSX = () => {
     if (!result) return
     const blob = base64ToBlob(result.xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    downloadBlob(blob, "departure_data_cleaned.xlsx")
+    downloadBlob(blob, `${exportBaseName()}.xlsx`)
   }
 
   const handleDownloadCSV = () => {
     if (!result) return
     const blob = base64ToBlob(result.csv, "text/csv")
-    downloadBlob(blob, "departure_data_cleaned.csv")
+    downloadBlob(blob, `${exportBaseName()}.csv`)
   }
 
   return (
