@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
     const result = await runPipeline(files)
 
     // ── Generate XLSX output ──────────────────────────────────────────────
-    const xlsxBuffer = rowsToXLSX(result.rows)
+    const xlsxBuffer = await rowsToXLSX(result.rows)
     const csvString  = rowsToCSV(result.rows)
 
     // Encode outputs as base64 to return in JSON alongside stats

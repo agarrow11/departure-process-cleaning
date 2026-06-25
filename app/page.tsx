@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, type CSSProperties } from "react"
 import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, AlertTriangle, XCircle, Download, Loader2, ChevronDown, ChevronUp, ChevronRight, X } from "lucide-react"
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -25,10 +25,16 @@ interface PipelineStats {
   totalColumns: number
 }
 
+interface AuditRowRef {
+  ecode: string
+  source: string
+  rowNumber: number | null
+}
+
 interface AuditIssue {
   value: string
   rowCount: number
-  rows: string[]
+  rows: AuditRowRef[]
 }
 
 interface AuditCheck {
@@ -368,6 +374,10 @@ export default function PipelinePage() {
                 <Download size={16} /> Download .csv
               </button>
             </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: "#888", display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ display: "inline-block", width: 12, height: 12, background: "#FFEB3B", border: "1px solid #e0cf00", borderRadius: 2 }} />
+              Cells highlighted yellow in the .xlsx are unresolved lookups (blank mapped values) that need attention. CSV has no highlighting.
+            </div>
           </div>
         )}
       </div>
@@ -559,15 +569,24 @@ function AuditDrillDownModal({ check, onClose }: { check: AuditCheck; onClose: (
   const valueHeader = check.issueLabel ?? "Value"
   const totalRows = issues.reduce((sum, it) => sum + it.rowCount, 0)
 
+  // Flatten to one entry per impacted record so each row can be triaged individually.
+  const flatRows = issues.flatMap((it) => it.rows.map((loc) => ({ value: it.value, loc })))
+
+  const thStyle: CSSProperties = {
+    textAlign: "left",
+    padding: "8px 20px",
+    fontSize: 11,
+    color: "#888",
+    fontWeight: 700,
+    borderBottom: "1px solid #f0f0ec",
+  }
+
   const handleExportCsv = () => {
     const esc = (v: string) => `"${v.replace(/"/g, '""')}"`
-    // Flat, triage-friendly list: one line per impacted row.
-    const header = `${esc(valueHeader)},${esc("Impacted row")}`
-    const lines: string[] = []
-    for (const it of issues) {
-      const rowList = it.rows.length === 1 && it.rows[0] === it.value ? [it.value] : it.rows
-      for (const rowId of rowList) lines.push(`${esc(it.value)},${esc(rowId)}`)
-    }
+    const header = [esc(valueHeader), esc("Row number"), esc("Source file"), esc("Ecode")].join(",")
+    const lines = flatRows.map(({ value, loc }) =>
+      [esc(value), esc(loc.rowNumber != null ? String(loc.rowNumber) : ""), esc(loc.source), esc(loc.ecode)].join(","),
+    )
     const csv = [header, ...lines].join("\r\n")
     const blob = new Blob([csv], { type: "text/csv" })
     const safe = check.label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")
@@ -626,55 +645,34 @@ function AuditDrillDownModal({ check, onClose }: { check: AuditCheck; onClose: (
           {check.detail}
         </div>
 
-        {/* Scrollable issue table */}
+        {/* Scrollable issue table — one row per impacted record */}
         <div style={{ overflowY: "auto", flex: 1 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr style={{ position: "sticky", top: 0, background: "#fafaf8" }}>
-                <th style={{ textAlign: "left", padding: "8px 20px", fontSize: 11, color: "#888", fontWeight: 700, borderBottom: "1px solid #f0f0ec", width: 160 }}>
-                  {valueHeader}
-                </th>
-                <th style={{ textAlign: "left", padding: "8px 20px", fontSize: 11, color: "#888", fontWeight: 700, borderBottom: "1px solid #f0f0ec" }}>
-                  Impacted rows (Ecode / source row)
-                </th>
+                <th style={thStyle}>{valueHeader}</th>
+                <th style={{ ...thStyle, width: 90, textAlign: "right" }}>Row #</th>
+                <th style={{ ...thStyle, width: 130 }}>Source file</th>
+                <th style={{ ...thStyle, width: 120 }}>Ecode</th>
               </tr>
             </thead>
             <tbody>
-              {issues.map((it, i) => {
-                // For blank-key checks the value IS the row reference; avoid showing it twice.
-                const rowList = it.rows.length === 1 && it.rows[0] === it.value ? [] : it.rows
-                return (
-                  <tr key={i} style={{ borderBottom: "1px solid #f5f5f0", verticalAlign: "top" }}>
-                    <td style={{ padding: "8px 20px", fontFamily: "monospace", color: "#1a1a1a" }}>
-                      {it.value || <span style={{ color: "#aaa", fontStyle: "italic" }}>(blank)</span>}
-                    </td>
-                    <td style={{ padding: "8px 20px", color: "#555" }}>
-                      {rowList.length === 0 ? (
-                        <span style={{ color: "#aaa" }}>—</span>
-                      ) : (
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                          {rowList.map((rowId, j) => (
-                            <span
-                              key={j}
-                              style={{
-                                fontFamily: "monospace",
-                                fontSize: 11,
-                                background: "#fafaf8",
-                                border: "1px solid #eee",
-                                borderRadius: 4,
-                                padding: "1px 6px",
-                                color: "#1a1a1a",
-                              }}
-                            >
-                              {rowId}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                )
-              })}
+              {flatRows.map(({ value, loc }, i) => (
+                <tr key={i} style={{ borderBottom: "1px solid #f5f5f0" }}>
+                  <td style={{ padding: "8px 20px", fontFamily: "monospace", color: "#1a1a1a" }}>
+                    {value || <span style={{ color: "#aaa", fontStyle: "italic" }}>(blank)</span>}
+                  </td>
+                  <td style={{ padding: "8px 20px", textAlign: "right", fontFamily: "monospace", color: "#1a1a1a" }}>
+                    {loc.rowNumber != null ? loc.rowNumber : <span style={{ color: "#aaa" }}>—</span>}
+                  </td>
+                  <td style={{ padding: "8px 20px", color: "#555" }}>
+                    {loc.source || <span style={{ color: "#aaa" }}>—</span>}
+                  </td>
+                  <td style={{ padding: "8px 20px", fontFamily: "monospace", color: "#555" }}>
+                    {loc.ecode || <span style={{ color: "#aaa" }}>—</span>}
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>

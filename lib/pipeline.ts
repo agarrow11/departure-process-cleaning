@@ -20,6 +20,7 @@
  */
 
 import * as XLSX from "xlsx"
+import ExcelJS from "exceljs"
 
 // =============================================================================
 // TYPES
@@ -55,14 +56,24 @@ export interface PipelineResult {
   audit: AuditReport
 }
 
+/** Points at one specific impacted record so the analyst can locate it. */
+export interface AuditRowRef {
+  /** The employee code, or "" if the row has no Ecode. */
+  ecode: string
+  /** Which source file the row came from, e.g. "Survey 1", "Exit Interview". */
+  source: string
+  /** 1-based row number within that source file's data (null when not applicable). */
+  rowNumber: number | null
+}
+
 /** One offending value found by an audit check, e.g. an unmatched code. */
 export interface AuditIssue {
   /** The offending value (e.g. an unmatched department code, or a blank-key placeholder). */
   value: string
   /** How many rows were affected by this value. */
   rowCount: number
-  /** Identifiers (Ecodes, or source row references) of the exact rows impacted. */
-  rows: string[]
+  /** The exact rows impacted — row number + source file + Ecode. */
+  rows: AuditRowRef[]
 }
 
 /** A single data-quality / integrity check performed while running the pipeline. */
@@ -286,8 +297,9 @@ function loadSurvey(buffer: ArrayBuffer, sourceTag: string, refLabel: string, wa
     ...r,
     [COLS.ECODE]: standardizeEcode(r[COLS.ECODE]),
     _source: sourceTag,
-    // Human-readable reference to the original record, used in the audit drill-down.
-    _rowRef: `${refLabel} row ${i + 1}`,
+    // Source file + row number, used to locate the original record in the audit drill-down.
+    _srcFile: refLabel,
+    _srcRow: i + 1,
   }))
 }
 
@@ -308,7 +320,8 @@ function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): Row[] {
       delete cleaned[COLS.EI_CLEANED_ECODE]
     }
     cleaned._source = "exit_interview"
-    cleaned._rowRef = `Exit Interview row ${i + 1}`
+    cleaned._srcFile = "Exit Interview"
+    cleaned._srcRow = i + 1
     return cleaned
   })
 }
@@ -384,7 +397,7 @@ export interface LookupAudit {
   total: number // rows that had a non-blank lookup key
   matched: number // rows whose key was found in the mapping
   blankKey: number // rows with no lookup key at all
-  unmatched: Map<string, string[]> // unmatched key -> identifiers of affected rows
+  unmatched: Map<string, AuditRowRef[]> // unmatched key -> affected rows
 }
 
 function newLookupAudit(): LookupAudit {
@@ -392,19 +405,20 @@ function newLookupAudit(): LookupAudit {
 }
 
 /**
- * Identifier for a single row, used to point the analyst at the exact records
- * to triage. Prefers the Ecode; falls back to the source-file row reference
- * (set during load) when the Ecode is blank.
+ * Build a structured locator (row number + source file + Ecode) for a row, so
+ * the audit can point the analyst at the exact record to triage. The source
+ * file and row number are stamped onto each row during load.
  */
-function rowRef(r: Row): string {
-  const ecode = String(r[COLS.ECODE] ?? "").trim()
-  if (ecode) return ecode
-  const ref = String((r as Row)._rowRef ?? "").trim()
-  return ref || "(unidentified row)"
+function rowLocator(r: Row): AuditRowRef {
+  return {
+    ecode: String(r[COLS.ECODE] ?? "").trim(),
+    source: String((r as Row)._srcFile ?? "").trim(),
+    rowNumber: typeof (r as Row)._srcRow === "number" ? ((r as Row)._srcRow as number) : null,
+  }
 }
 
 /** Record one lookup attempt against an audit tally, remembering the affected row. */
-function recordLookup(audit: LookupAudit, rawKey: unknown, matched: boolean, rowId: string): void {
+function recordLookup(audit: LookupAudit, rawKey: unknown, matched: boolean, loc: AuditRowRef): void {
   const key = String(rawKey ?? "").trim()
   if (!key) {
     audit.blankKey++
@@ -414,7 +428,7 @@ function recordLookup(audit: LookupAudit, rawKey: unknown, matched: boolean, row
   if (matched) audit.matched++
   else {
     const rows = audit.unmatched.get(key) ?? []
-    rows.push(rowId)
+    rows.push(loc)
     audit.unmatched.set(key, rows)
   }
 }
@@ -431,7 +445,7 @@ function applyDeptMapping(
   return rows.map((r) => {
     const code = String(r[COLS.DEPT_INPUT_KEY] ?? "").trim().toUpperCase()
     const lookup = map.get(code)
-    recordLookup(audit, r[COLS.DEPT_INPUT_KEY], !!lookup, rowRef(r))
+    recordLookup(audit, r[COLS.DEPT_INPUT_KEY], !!lookup, rowLocator(r))
     return {
       ...r,
       Department: lookup?.dept ?? r["Department"] ?? null,
@@ -449,7 +463,7 @@ function applyGeoMapping(
   return rows.map((r) => {
     const code = Number(r[COLS.GEO_INPUT_KEY])
     const lookup = isNaN(code) ? undefined : map.get(code)
-    recordLookup(audit, r[COLS.GEO_INPUT_KEY], !!lookup, rowRef(r))
+    recordLookup(audit, r[COLS.GEO_INPUT_KEY], !!lookup, rowLocator(r))
     return {
       ...r,
       ExternalDataReference: lookup?.office ?? r["ExternalDataReference"] ?? null,
@@ -467,7 +481,7 @@ function applyPDMapping(
   return rows.map((r) => {
     const code = String(r[COLS.PD_CODE] ?? "").trim().toUpperCase()
     const lookup = map.get(code)
-    recordLookup(audit, r[COLS.PD_CODE], !!lookup, rowRef(r))
+    recordLookup(audit, r[COLS.PD_CODE], !!lookup, rowLocator(r))
     return {
       ...r,
       "Mapped Seniority": lookup?.seniority ?? r["Mapped Seniority"] ?? null,
@@ -598,7 +612,7 @@ function summarizeLookup(label: string, mapSize: number, audit: LookupAudit): Au
     .sort((a, b) => b.rowCount - a.rowCount)
   const samples = issues
     .slice(0, MAX_SAMPLES)
-    .map(({ value, rows }) => `${value} → ${rows.slice(0, 3).join(", ")}${rows.length > 3 ? "…" : ""}`)
+    .map(({ value, rows }) => `${value} → ${rows.slice(0, 3).map(formatRowRef).join(", ")}${rows.length > 3 ? "…" : ""}`)
   const issueLabel = "Unmatched code"
 
   const blankNote = audit.blankKey > 0 ? ` ${fmtInt(audit.blankKey)} row(s) had a blank key.` : ""
@@ -644,6 +658,13 @@ function summarizeLookup(label: string, mapSize: number, audit: LookupAudit): Au
 
 function fmtInt(n: number): string {
   return n.toLocaleString("en-US")
+}
+
+/** Compact human-readable reference to a single impacted row, for chip previews. */
+function formatRowRef(loc: AuditRowRef): string {
+  const where = loc.source && loc.rowNumber != null ? `${loc.source} row ${loc.rowNumber}` : loc.source
+  if (loc.ecode && where) return `${loc.ecode} (${where})`
+  return loc.ecode || where || "(unidentified row)"
 }
 
 // =============================================================================
@@ -720,7 +741,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   const enriched = population.map((r) => {
     const ecode = String(r[COLS.ECODE] ?? "")
     const bbRow = bbByEcode.get(ecode)
-    recordLookup(bbAudit, ecode, !!bbRow, ecode)
+    recordLookup(bbAudit, ecode, !!bbRow, { ecode, source: "Merged population", rowNumber: null })
     if (!bbRow) return r
     beyondBainMatched++
     // Prefix all BB columns with BB_ to avoid collisions
@@ -734,7 +755,12 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   // ── STEP 7: Drop internal pipeline columns ──────────────────────────────
   const finalRows = enriched.map((r) => {
-    const { _source, _rowRef, ...rest } = r as Row & { _source?: unknown; _rowRef?: unknown }
+    const { _source, _rowRef, _srcFile, _srcRow, ...rest } = r as Row & {
+      _source?: unknown
+      _rowRef?: unknown
+      _srcFile?: unknown
+      _srcRow?: unknown
+    }
     return rest
   })
 
@@ -744,35 +770,37 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   const checks: AuditCheck[] = []
 
   // Blank join-key checks (rows that can never join because they have no Ecode).
-  // The offending rows have no Ecode, so we identify them by their source-file row reference.
-  const surveyBlankRefs = combinedSurvey
+  // The offending rows have no Ecode, so we identify them by source file + row number.
+  const surveyBlankLocs = combinedSurvey
     .filter((r) => !String(r[COLS.ECODE] ?? "").trim())
-    .map((r) => rowRef(r))
-  const eiBlankRefs = combinedEI
+    .map((r) => rowLocator(r))
+  const eiBlankLocs = combinedEI
     .filter((r) => !String(r[COLS.ECODE] ?? "").trim())
-    .map((r) => rowRef(r))
+    .map((r) => rowLocator(r))
+  // One issue per affected row; the value marks the problem, the row carries the location.
+  const blankIssues = (locs: AuditRowRef[]): AuditIssue[] =>
+    locs.map((loc) => ({ value: "(blank Ecode)", rowCount: 1, rows: [loc] }))
   checks.push({
     label: "Survey join key (Ecode)",
-    status: surveyBlankRefs.length > 0 ? "warning" : "ok",
+    status: surveyBlankLocs.length > 0 ? "warning" : "ok",
     detail:
-      surveyBlankRefs.length > 0
-        ? `${fmtInt(surveyBlankRefs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode and were excluded from the merge.`
+      surveyBlankLocs.length > 0
+        ? `${fmtInt(surveyBlankLocs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode and were excluded from the merge.`
         : `All ${fmtInt(combinedSurvey.length)} survey rows have a valid Ecode.`,
-    samples: surveyBlankRefs.slice(0, MAX_SAMPLES),
-    issueLabel: surveyBlankRefs.length > 0 ? "Affected row" : undefined,
-    issues:
-      surveyBlankRefs.length > 0 ? surveyBlankRefs.map((ref) => ({ value: ref, rowCount: 1, rows: [ref] })) : undefined,
+    samples: surveyBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
+    issueLabel: surveyBlankLocs.length > 0 ? "Issue" : undefined,
+    issues: surveyBlankLocs.length > 0 ? blankIssues(surveyBlankLocs) : undefined,
   })
   checks.push({
     label: "Exit Interview join key (Ecode)",
-    status: eiBlankRefs.length > 0 ? "warning" : "ok",
+    status: eiBlankLocs.length > 0 ? "warning" : "ok",
     detail:
-      eiBlankRefs.length > 0
-        ? `${fmtInt(eiBlankRefs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode and were excluded from the merge.`
+      eiBlankLocs.length > 0
+        ? `${fmtInt(eiBlankLocs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode and were excluded from the merge.`
         : `All ${fmtInt(combinedEI.length)} exit-interview rows have a valid Ecode.`,
-    samples: eiBlankRefs.slice(0, MAX_SAMPLES),
-    issueLabel: eiBlankRefs.length > 0 ? "Affected row" : undefined,
-    issues: eiBlankRefs.length > 0 ? eiBlankRefs.map((ref) => ({ value: ref, rowCount: 1, rows: [ref] })) : undefined,
+    samples: eiBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
+    issueLabel: eiBlankLocs.length > 0 ? "Issue" : undefined,
+    issues: eiBlankLocs.length > 0 ? blankIssues(eiBlankLocs) : undefined,
   })
 
   // Mapping lookup checks
@@ -829,11 +857,75 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 // OUTPUT HELPERS
 // =============================================================================
 
-export function rowsToXLSX(rows: Row[]): Buffer {
-  const ws = XLSX.utils.json_to_sheet(rows)
-  const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, ws, "departure_data_cleaned")
-  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer
+/**
+ * Mapped output columns. When any of these is blank in the final output it means
+ * a lookup didn't resolve — exactly the issue an analyst needs to fix — so we
+ * highlight those cells yellow in the exported workbook.
+ */
+const HIGHLIGHT_COLS = [
+  "Department",
+  "Sub-Function",
+  "Function",
+  "ExternalDataReference",
+  "Cluster",
+  "Region",
+  "Mapped Seniority",
+  "Mapped Employee Level",
+  "Mapped Position",
+]
+
+function isBlank(v: unknown): boolean {
+  return v === null || v === undefined || String(v).trim() === ""
+}
+
+/**
+ * Build the cleaned XLSX with ExcelJS so we can apply cell styling (SheetJS's
+ * community build cannot write fills). Any blank mapped cell is filled yellow
+ * so unresolved lookups are easy to spot and triage in the output.
+ */
+export async function rowsToXLSX(rows: Row[]): Promise<Buffer> {
+  const wb = new ExcelJS.Workbook()
+  const ws = wb.addWorksheet("departure_data_cleaned")
+
+  // Column order = union of keys across all rows, preserving first-seen order.
+  const cols: string[] = []
+  const seen = new Set<string>()
+  for (const r of rows) {
+    for (const k of Object.keys(r)) {
+      if (!seen.has(k)) {
+        seen.add(k)
+        cols.push(k)
+      }
+    }
+  }
+
+  ws.columns = cols.map((c) => ({ header: c, key: c }))
+  ws.getRow(1).font = { bold: true }
+  ws.views = [{ state: "frozen", ySplit: 1 }] // keep header visible while scrolling
+
+  const highlightCols = HIGHLIGHT_COLS.filter((c) => seen.has(c))
+
+  for (const r of rows) {
+    const values: Record<string, string | number> = {}
+    for (const c of cols) {
+      const v = r[c]
+      values[c] = isBlank(v) ? "" : (v as string | number)
+    }
+    const added = ws.addRow(values)
+    // Highlight blank mapped cells (unresolved lookups).
+    for (const c of highlightCols) {
+      if (isBlank(r[c])) {
+        added.getCell(c).fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFFEB3B" }, // yellow
+        }
+      }
+    }
+  }
+
+  const buf = await wb.xlsx.writeBuffer()
+  return Buffer.from(buf as ArrayBuffer)
 }
 
 export function rowsToCSV(rows: Row[]): string {

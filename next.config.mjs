@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Required for SheetJS (xlsx) to work correctly in API routes
-  serverExternalPackages: ['xlsx'],
+  // Required for SheetJS (xlsx) and ExcelJS to work correctly in API routes
+  serverExternalPackages: ['xlsx', 'exceljs'],
   typescript: {
     ignoreBuildErrors: true,
   },
