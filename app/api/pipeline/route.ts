@@ -1,0 +1,65 @@
+import { type NextRequest, NextResponse } from "next/server"
+import { runPipeline, rowsToXLSX, rowsToCSV } from "@/lib/pipeline"
+
+export const runtime = "nodejs" // Required: pipeline uses Node Buffer APIs
+export const maxDuration = 300   // 5 min — large files may take time
+
+export async function POST(request: NextRequest) {
+  try {
+    const formData = await request.formData()
+
+    // ── Validate all required files are present ──────────────────────────
+    const required = [
+      "oldSurvey", "newSurvey", "exitInterview", "beyondBain",
+      "deptHierarchy", "geoHierarchy", "pdGrade",
+    ]
+    for (const key of required) {
+      if (!formData.get(key)) {
+        return NextResponse.json(
+          { error: `Missing required file: ${key}` },
+          { status: 400 }
+        )
+      }
+    }
+
+    // ── Read all files into ArrayBuffers ─────────────────────────────────
+    const toBuffer = async (key: string): Promise<ArrayBuffer> => {
+      const file = formData.get(key) as File
+      return await file.arrayBuffer()
+    }
+
+    const files = {
+      oldSurvey:     await toBuffer("oldSurvey"),
+      newSurvey:     await toBuffer("newSurvey"),
+      exitInterview: await toBuffer("exitInterview"),
+      beyondBain:    await toBuffer("beyondBain"),
+      deptHierarchy: await toBuffer("deptHierarchy"),
+      geoHierarchy:  await toBuffer("geoHierarchy"),
+      pdGrade:       await toBuffer("pdGrade"),
+    }
+
+    // ── Run pipeline ──────────────────────────────────────────────────────
+    const result = await runPipeline(files)
+
+    // ── Generate XLSX output ──────────────────────────────────────────────
+    const xlsxBuffer = rowsToXLSX(result.rows)
+    const csvString  = rowsToCSV(result.rows)
+
+    // Encode outputs as base64 to return in JSON alongside stats
+    const xlsxBase64 = Buffer.from(xlsxBuffer).toString("base64")
+    const csvBase64  = Buffer.from(csvString).toString("base64")
+
+    return NextResponse.json({
+      success: true,
+      stats: result.stats,
+      warnings: result.warnings,
+      xlsx: xlsxBase64,
+      csv: csvBase64,
+    })
+
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error("[pipeline] Error:", message)
+    return NextResponse.json({ error: message }, { status: 500 })
+  }
+}
