@@ -11,6 +11,12 @@
  *   4. Outer join Survey + EI on Ecode
  *   5. Left join Beyond Bain on Ecode
  *   6. Output cleaned CSV + XLSX
+ *
+ * NOTE: Sheet names and header-row positions are detected automatically by
+ * scanning each workbook for the anchor columns each file is expected to
+ * contain. Month-to-month changes to date-stamped tab names
+ * (e.g. "Dept Hierarchy_260206") or shifted header rows therefore no longer
+ * break the pipeline — as long as the underlying column names stay the same.
  */
 
 import * as XLSX from "xlsx"
@@ -56,42 +62,70 @@ const COLS = {
   // Shared join key
   ECODE: "Ecode",
 
-  // Survey sheets
-  SURVEY_SHEET_OLD: "Final File_Part 1_Prepped for Q",
-  SURVEY_SHEET_NEW: "Datasheet+and+Departure+Survey+",
-
   // Exit Interview
   EI_CLEANED_ECODE: "Cleaned Ecode",
-  EI_SHEET: "Exit Interview",
 
   // Beyond Bain
-  BB_SHEET: "Proposed Export",
   BB_ECODE: "E-code (ZID11_48)",
   BB_FUNCTION: "Function (ZID4_117)",
   BB_MAPPED_FUNCTION: "Mapped Role Function", // created by Logic #1
 
   // Dept Hierarchy mapping
-  DEPT_SHEET: "Dept Hierarchy_260206",
-  DEPT_CODE: "dept_code",       // lookup key
-  DEPT_DEPT: "Department",      // → Department in input files
+  DEPT_CODE: "dept_code", // lookup key
+  DEPT_DEPT: "Department", // → Department in input files
   DEPT_SUBFUNC: "Sub-Function", // → Sub-Function in input files
   DEPT_FUNC: "People Function", // → Function in input files
   DEPT_INPUT_KEY: "Department_ID", // key field in input files
 
   // Geo Hierarchy mapping
-  GEO_SHEET: "New columns and New ordering",
-  GEO_CODE: "office_code",                  // lookup key
-  GEO_OFFICE: "people_office_display",      // → ExternalDataReference
-  GEO_CLUSTER: "people_cluster_display",    // → Cluster
-  GEO_REGION: "people_region_display",      // → Region
-  GEO_INPUT_KEY: "Office_Code",             // key field in input files
+  GEO_CODE: "office_code", // lookup key
+  GEO_OFFICE: "people_office_display", // → ExternalDataReference
+  GEO_CLUSTER: "people_cluster_display", // → Cluster
+  GEO_REGION: "people_region_display", // → Region
+  GEO_INPUT_KEY: "Office_Code", // key field in input files
 
   // PD Grade mapping
-  PD_CODE: "PD Grade",        // lookup key (same name in input files)
-  PD_SENIORITY: "Seniority",  // → Mapped Seniority
+  PD_CODE: "PD Grade", // lookup key (same name in input files)
+  PD_SENIORITY: "Seniority", // → Mapped Seniority
   PD_LEVEL: "Employee Level", // → Mapped Employee Level
-  PD_POSITION: "CPH_3",       // → Mapped Position
+  PD_POSITION: "CPH_3", // → Mapped Position
 }
+
+/**
+ * Anchor columns used to auto-locate the correct sheet AND header row in each
+ * workbook. Every `required` column MUST appear in a sheet's header row for that
+ * sheet to be accepted; `optional` columns raise the confidence score when
+ * choosing between candidate rows/sheets.
+ */
+const SHEET_ANCHORS = {
+  survey: {
+    required: [COLS.ECODE],
+    optional: [COLS.DEPT_INPUT_KEY, COLS.GEO_INPUT_KEY, COLS.PD_CODE],
+  },
+  ei: {
+    required: [COLS.EI_CLEANED_ECODE],
+    optional: [COLS.DEPT_INPUT_KEY, COLS.GEO_INPUT_KEY, COLS.PD_CODE],
+  },
+  dept: {
+    required: [COLS.DEPT_CODE],
+    optional: [COLS.DEPT_DEPT, COLS.DEPT_SUBFUNC, COLS.DEPT_FUNC],
+  },
+  geo: {
+    required: [COLS.GEO_CODE],
+    optional: [COLS.GEO_OFFICE, COLS.GEO_CLUSTER, COLS.GEO_REGION],
+  },
+  bb: {
+    required: [COLS.BB_ECODE],
+    optional: [COLS.BB_FUNCTION],
+  },
+  pd: {
+    required: [COLS.PD_CODE],
+    optional: [COLS.PD_SENIORITY, COLS.PD_LEVEL, COLS.PD_POSITION],
+  },
+}
+
+// How many rows to scan from the top of a sheet when hunting for the header row.
+const MAX_HEADER_SCAN = 20
 
 // =============================================================================
 // HELPERS
@@ -102,45 +136,119 @@ function standardizeEcode(val: unknown): string {
   return String(val).trim().toUpperCase()
 }
 
-function readSheet(buffer: ArrayBuffer, sheetName: string, headerRow = 0): Row[] {
-  const wb = XLSX.read(buffer, { type: "array" })
-  const ws = wb.Sheets[sheetName]
-  if (!ws) throw new Error(`Sheet "${sheetName}" not found. Available: ${wb.SheetNames.join(", ")}`)
-  const rows: Row[] = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false, range: headerRow })
-  return rows
+function normalizeHeader(v: unknown): string {
+  return String(v ?? "").trim().toLowerCase()
 }
 
-function readFirstSheet(buffer: ArrayBuffer, headerRow = 0): Row[] {
-  const wb = XLSX.read(buffer, { type: "array" })
-  const ws = wb.Sheets[wb.SheetNames[0]]
-  const rows: Row[] = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false, range: headerRow })
+function readWorkbook(buffer: ArrayBuffer | string): XLSX.WorkBook {
+  return typeof buffer === "string"
+    ? XLSX.read(buffer, { type: "string" })
+    : XLSX.read(buffer, { type: "array" })
+}
+
+/** Convert a worksheet to a raw matrix (array of rows), preserving row indices. */
+function sheetToMatrix(ws: XLSX.WorkSheet): unknown[][] {
+  return XLSX.utils.sheet_to_json(ws, {
+    header: 1,
+    defval: null,
+    raw: false,
+    blankrows: true,
+  }) as unknown[][]
+}
+
+/**
+ * Scan the first MAX_HEADER_SCAN rows of a matrix and return the row index whose
+ * cells best match the expected column names (case-insensitive). Returns row -1
+ * if no scanned row matches any expected column.
+ */
+function detectHeaderRow(matrix: unknown[][], expectedCols: string[]): { row: number; score: number } {
+  const expected = expectedCols.map(normalizeHeader)
+  let best = { row: -1, score: 0 }
+  const limit = Math.min(MAX_HEADER_SCAN, matrix.length)
+  for (let i = 0; i < limit; i++) {
+    const cells = new Set((matrix[i] ?? []).map(normalizeHeader))
+    let score = 0
+    for (const e of expected) if (e && cells.has(e)) score++
+    if (score > best.score) best = { row: i, score }
+  }
+  return best
+}
+
+/**
+ * Locate the correct sheet + header row in a workbook by content, then parse it.
+ * Picks the sheet whose header row contains the most `required` anchors (then
+ * the highest overall score). Throws a descriptive error if none qualifies.
+ */
+function locateAndRead(
+  buffer: ArrayBuffer | string,
+  anchors: { required: string[]; optional: string[] },
+  label: string,
+  warnings: string[],
+): { rows: Row[]; sheetName: string; headerRow: number } {
+  const wb = readWorkbook(buffer)
+  const allAnchors = [...anchors.required, ...anchors.optional]
+
+  let best = { name: "", headerRow: -1, score: -1, requiredHits: -1 }
+
+  for (const name of wb.SheetNames) {
+    const matrix = sheetToMatrix(wb.Sheets[name])
+    if (matrix.length === 0) continue
+    const { row, score } = detectHeaderRow(matrix, allAnchors)
+    if (row < 0) continue
+    const headerCells = new Set((matrix[row] ?? []).map(normalizeHeader))
+    const requiredHits = anchors.required.filter((k) => headerCells.has(normalizeHeader(k))).length
+    if (
+      requiredHits > best.requiredHits ||
+      (requiredHits === best.requiredHits && score > best.score)
+    ) {
+      best = { name, headerRow: row, score, requiredHits }
+    }
+  }
+
+  if (best.headerRow < 0 || best.requiredHits < anchors.required.length) {
+    throw new Error(
+      `Could not locate the ${label} sheet. Expected a sheet containing column(s) ` +
+        `[${anchors.required.join(", ")}]. Available sheets: ${wb.SheetNames.join(", ")}.`,
+    )
+  }
+
+  warnings.push(`${label}: detected sheet "${best.name}", header on row ${best.headerRow + 1}.`)
+
+  const rows: Row[] = XLSX.utils.sheet_to_json(wb.Sheets[best.name], {
+    defval: null,
+    raw: false,
+    range: best.headerRow,
+  })
+  return { rows, sheetName: best.name, headerRow: best.headerRow }
+}
+
+/** Detect a Qualtrics metadata row (the `{"ImportId":...}` row beneath headers). */
+function looksLikeQualtricsMeta(r: Row): boolean {
+  for (const v of Object.values(r)) {
+    const s = String(v ?? "")
+    if (s.includes("ImportId") || s.trimStart().startsWith('{"')) return true
+  }
+  return false
+}
+
+/** Drop the leading Qualtrics metadata row only if it is actually present. */
+function dropQualtricsMeta(rows: Row[], label: string, warnings: string[]): Row[] {
+  if (rows.length > 0 && looksLikeQualtricsMeta(rows[0])) {
+    warnings.push(`${label}: dropped Qualtrics metadata row.`)
+    return rows.slice(1)
+  }
   return rows
 }
 
 /**
  * Load survey file.
- * - Headers in row 2 (index 1) → headerRow=1 in sheet_to_json
- * - Row immediately after headers is Qualtrics metadata → drop first data row
+ * - Sheet + header row detected automatically via the "Ecode" anchor.
+ * - The Qualtrics metadata row beneath the header is dropped only if present.
  */
-function loadSurvey(buffer: ArrayBuffer, sheetName: string, sourceTag: string): Row[] {
-  const wb = XLSX.read(buffer, { type: "array" })
-
-  // Find sheet — try exact name first, then case-insensitive partial match
-  let ws = wb.Sheets[sheetName]
-  if (!ws) {
-    const match = wb.SheetNames.find(n =>
-      n.toLowerCase().includes(sheetName.toLowerCase().slice(0, 10))
-    )
-    if (match) ws = wb.Sheets[match]
-    else throw new Error(`Survey sheet "${sheetName}" not found. Available: ${wb.SheetNames.join(", ")}`)
-  }
-
-  // header=1 → row index 1 (0-based) is the header row
-  const rows: Row[] = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false, range: 1 })
-  // Drop first row (Qualtrics metadata)
-  const data = rows.slice(1)
-  // Standardize Ecode and tag source
-  return data.map(r => ({
+function loadSurvey(buffer: ArrayBuffer, sourceTag: string, warnings: string[]): Row[] {
+  const { rows } = locateAndRead(buffer, SHEET_ANCHORS.survey, "Survey", warnings)
+  const data = dropQualtricsMeta(rows, "Survey", warnings)
+  return data.map((r) => ({
     ...r,
     [COLS.ECODE]: standardizeEcode(r[COLS.ECODE]),
     _source: sourceTag,
@@ -149,22 +257,16 @@ function loadSurvey(buffer: ArrayBuffer, sheetName: string, sourceTag: string): 
 
 /**
  * Load Exit Interview file.
- * - Headers in row 2 → same range=1 trick
- * - Primary key is "Cleaned Ecode" → renamed to "Ecode" for joining
+ * - Sheet + header row detected automatically via the "Cleaned Ecode" anchor.
+ * - Primary key "Cleaned Ecode" is renamed to "Ecode" for joining.
  */
-function loadExitInterview(buffer: ArrayBuffer): Row[] {
-  const wb = XLSX.read(buffer, { type: "array" })
-  // Try named sheet first, fall back to first sheet
-  const sheetName = wb.SheetNames.includes(COLS.EI_SHEET)
-    ? COLS.EI_SHEET
-    : wb.SheetNames[0]
-  const ws = wb.Sheets[sheetName]
-  const rows: Row[] = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false, range: 1 })
-  const data = rows.slice(1) // drop Qualtrics metadata row
+function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): Row[] {
+  const { rows } = locateAndRead(buffer, SHEET_ANCHORS.ei, "Exit Interview", warnings)
+  const data = dropQualtricsMeta(rows, "Exit Interview", warnings)
 
-  return data.map(r => {
+  return data.map((r) => {
     const cleaned = { ...r }
-    // Rename "Cleaned Ecode" → "Ecode" for joining; keep raw value too
+    // Rename "Cleaned Ecode" → "Ecode" for joining
     if (COLS.EI_CLEANED_ECODE in cleaned) {
       cleaned[COLS.ECODE] = standardizeEcode(cleaned[COLS.EI_CLEANED_ECODE])
       delete cleaned[COLS.EI_CLEANED_ECODE]
@@ -178,12 +280,11 @@ function loadExitInterview(buffer: ArrayBuffer): Row[] {
 // MAPPING LOADERS
 // =============================================================================
 
-function loadDeptMapping(buffer: ArrayBuffer): Map<string, { dept: string; subFunc: string; func: string }> {
-  const wb = XLSX.read(buffer, { type: "array" })
-  // Use named sheet, ignore "Sheet1"
-  const sheetName = wb.SheetNames.find(n => n !== "Sheet1") ?? wb.SheetNames[0]
-  const ws = wb.Sheets[sheetName]
-  const rows: Row[] = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false })
+function loadDeptMapping(
+  buffer: ArrayBuffer,
+  warnings: string[],
+): Map<string, { dept: string; subFunc: string; func: string }> {
+  const { rows } = locateAndRead(buffer, SHEET_ANCHORS.dept, "Dept Hierarchy", warnings)
 
   const map = new Map<string, { dept: string; subFunc: string; func: string }>()
   for (const r of rows) {
@@ -198,14 +299,11 @@ function loadDeptMapping(buffer: ArrayBuffer): Map<string, { dept: string; subFu
   return map
 }
 
-function loadGeoMapping(buffer: ArrayBuffer): Map<number, { office: string; cluster: string; region: string }> {
-  const wb = XLSX.read(buffer, { type: "array" })
-  const sheetName = wb.SheetNames.includes(COLS.GEO_SHEET)
-    ? COLS.GEO_SHEET
-    : wb.SheetNames[0]
-  const ws = wb.Sheets[sheetName]
-  // Header is in row 3 (index 2)
-  const rows: Row[] = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false, range: 2 })
+function loadGeoMapping(
+  buffer: ArrayBuffer,
+  warnings: string[],
+): Map<number, { office: string; cluster: string; region: string }> {
+  const { rows } = locateAndRead(buffer, SHEET_ANCHORS.geo, "Geo Hierarchy", warnings)
 
   const map = new Map<number, { office: string; cluster: string; region: string }>()
   for (const r of rows) {
@@ -221,15 +319,11 @@ function loadGeoMapping(buffer: ArrayBuffer): Map<number, { office: string; clus
   return map
 }
 
-function loadPDMapping(csvBuffer: ArrayBuffer | string): Map<string, { seniority: string; level: string; position: string }> {
-  let wb: XLSX.WorkBook
-  if (typeof csvBuffer === "string") {
-    wb = XLSX.read(csvBuffer, { type: "string" })
-  } else {
-    wb = XLSX.read(csvBuffer, { type: "array" })
-  }
-  const ws = wb.Sheets[wb.SheetNames[0]]
-  const rows: Row[] = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false })
+function loadPDMapping(
+  csvBuffer: ArrayBuffer | string,
+  warnings: string[],
+): Map<string, { seniority: string; level: string; position: string }> {
+  const { rows } = locateAndRead(csvBuffer, SHEET_ANCHORS.pd, "PD Grade", warnings)
 
   const map = new Map<string, { seniority: string; level: string; position: string }>()
   for (const r of rows) {
@@ -248,8 +342,11 @@ function loadPDMapping(csvBuffer: ArrayBuffer | string): Map<string, { seniority
 // MAPPING APPLIERS
 // =============================================================================
 
-function applyDeptMapping(rows: Row[], map: Map<string, { dept: string; subFunc: string; func: string }>): Row[] {
-  return rows.map(r => {
+function applyDeptMapping(
+  rows: Row[],
+  map: Map<string, { dept: string; subFunc: string; func: string }>,
+): Row[] {
+  return rows.map((r) => {
     const code = String(r[COLS.DEPT_INPUT_KEY] ?? "").trim().toUpperCase()
     const lookup = map.get(code)
     return {
@@ -261,8 +358,11 @@ function applyDeptMapping(rows: Row[], map: Map<string, { dept: string; subFunc:
   })
 }
 
-function applyGeoMapping(rows: Row[], map: Map<number, { office: string; cluster: string; region: string }>): Row[] {
-  return rows.map(r => {
+function applyGeoMapping(
+  rows: Row[],
+  map: Map<number, { office: string; cluster: string; region: string }>,
+): Row[] {
+  return rows.map((r) => {
     const code = Number(r[COLS.GEO_INPUT_KEY])
     const lookup = isNaN(code) ? undefined : map.get(code)
     return {
@@ -274,8 +374,11 @@ function applyGeoMapping(rows: Row[], map: Map<number, { office: string; cluster
   })
 }
 
-function applyPDMapping(rows: Row[], map: Map<string, { seniority: string; level: string; position: string }>): Row[] {
-  return rows.map(r => {
+function applyPDMapping(
+  rows: Row[],
+  map: Map<string, { seniority: string; level: string; position: string }>,
+): Row[] {
+  return rows.map((r) => {
     const code = String(r[COLS.PD_CODE] ?? "").trim().toUpperCase()
     const lookup = map.get(code)
     return {
@@ -291,7 +394,7 @@ function applyAllMappings(
   rows: Row[],
   deptMap: Map<string, { dept: string; subFunc: string; func: string }>,
   geoMap: Map<number, { office: string; cluster: string; region: string }>,
-  pdMap: Map<string, { seniority: string; level: string; position: string }>
+  pdMap: Map<string, { seniority: string; level: string; position: string }>,
 ): Row[] {
   let result = applyDeptMapping(rows, deptMap)
   result = applyGeoMapping(result, geoMap)
@@ -305,7 +408,7 @@ function applyAllMappings(
  * Stores result in new column "Mapped Role Function".
  */
 function applyBeyondBainLogic(rows: Row[]): Row[] {
-  return rows.map(r => {
+  return rows.map((r) => {
     const raw = String(r[COLS.BB_FUNCTION] ?? "")
     const mapped = raw === "null" || raw === "" ? null : raw.split(";")[0].trim()
     return { ...r, [COLS.BB_MAPPED_FUNCTION]: mapped }
@@ -316,7 +419,10 @@ function applyBeyondBainLogic(rows: Row[]): Row[] {
 // OUTER JOIN (Survey + EI on Ecode)
 // =============================================================================
 
-function outerJoin(surveyRows: Row[], eiRows: Row[]): {
+function outerJoin(
+  surveyRows: Row[],
+  eiRows: Row[],
+): {
   merged: Row[]
   bothCount: number
   surveyOnlyCount: number
@@ -385,13 +491,13 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   const warnings: string[] = []
 
   // ── STEP 1: Load mapping files ─────────────────────────────────────────
-  const deptMap = loadDeptMapping(files.deptHierarchy)
-  const geoMap = loadGeoMapping(files.geoHierarchy)
-  const pdMap = loadPDMapping(files.pdGrade)
+  const deptMap = loadDeptMapping(files.deptHierarchy, warnings)
+  const geoMap = loadGeoMapping(files.geoHierarchy, warnings)
+  const pdMap = loadPDMapping(files.pdGrade, warnings)
 
   // ── STEP 2: Load and stack surveys ─────────────────────────────────────
-  let oldSurvey = loadSurvey(files.oldSurvey, COLS.SURVEY_SHEET_OLD, "departure_survey")
-  let newSurvey = loadSurvey(files.newSurvey, COLS.SURVEY_SHEET_NEW, "departure_survey")
+  const oldSurvey = loadSurvey(files.oldSurvey, "departure_survey", warnings)
+  const newSurvey = loadSurvey(files.newSurvey, "departure_survey", warnings)
 
   const oldSurveyRows = oldSurvey.length
   const newSurveyRows = newSurvey.length
@@ -407,26 +513,26 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     return out
   }
   const combinedSurvey = [
-    ...oldSurvey.map(r => normalizeRow(r, allSurveyCols)),
-    ...newSurvey.map(r => normalizeRow(r, allSurveyCols)),
+    ...oldSurvey.map((r) => normalizeRow(r, allSurveyCols)),
+    ...newSurvey.map((r) => normalizeRow(r, allSurveyCols)),
   ]
 
   // ── STEP 3: Load exit interview ─────────────────────────────────────────
-  let combinedEI = loadExitInterview(files.exitInterview)
+  const combinedEI = loadExitInterview(files.exitInterview, warnings)
 
   // ── STEP 4: Apply mappings ──────────────────────────────────────────────
   const mappedSurvey = applyAllMappings(combinedSurvey, deptMap, geoMap, pdMap)
   const mappedEI = applyAllMappings(combinedEI, deptMap, geoMap, pdMap)
 
   // ── STEP 5: Outer join survey + EI ─────────────────────────────────────
-  const { merged: population, bothCount, surveyOnlyCount, eiOnlyCount } =
-    outerJoin(mappedSurvey, mappedEI)
+  const { merged: population, bothCount, surveyOnlyCount, eiOnlyCount } = outerJoin(
+    mappedSurvey,
+    mappedEI,
+  )
 
-  // ── STEP 6: Enrich with Beyond Bain (left join) ────────���────────────────
-  const bbWb = XLSX.read(files.beyondBain, { type: "array" })
-  const bbSheet = bbWb.Sheets[COLS.BB_SHEET] ?? bbWb.Sheets[bbWb.SheetNames[0]]
-  let bbRows: Row[] = XLSX.utils.sheet_to_json(bbSheet, { defval: null, raw: false })
-  bbRows = bbRows.map(r => ({
+  // ── STEP 6: Enrich with Beyond Bain (left join) ─────────────────────────
+  const { rows: bbRaw } = locateAndRead(files.beyondBain, SHEET_ANCHORS.bb, "Beyond Bain", warnings)
+  let bbRows: Row[] = bbRaw.map((r) => ({
     ...r,
     [COLS.BB_ECODE]: standardizeEcode(r[COLS.BB_ECODE]),
   }))
@@ -440,7 +546,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   }
 
   let beyondBainMatched = 0
-  const enriched = population.map(r => {
+  const enriched = population.map((r) => {
     const ecode = String(r[COLS.ECODE] ?? "")
     const bbRow = bbByEcode.get(ecode)
     if (!bbRow) return r
@@ -455,7 +561,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   })
 
   // ── STEP 7: Drop internal pipeline columns ──────────────────────────────
-  const finalRows = enriched.map(r => {
+  const finalRows = enriched.map((r) => {
     const { _source, ...rest } = r as Row & { _source?: unknown }
     return rest
   })
