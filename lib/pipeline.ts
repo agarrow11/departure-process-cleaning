@@ -61,6 +61,8 @@ export interface AuditIssue {
   value: string
   /** How many rows were affected by this value. */
   rowCount: number
+  /** Identifiers (Ecodes, or source row references) of the exact rows impacted. */
+  rows: string[]
 }
 
 /** A single data-quality / integrity check performed while running the pipeline. */
@@ -277,13 +279,15 @@ function dropQualtricsMeta(rows: Row[], label: string, warnings: string[]): Row[
  * - Sheet + header row detected automatically via the "Ecode" anchor.
  * - The Qualtrics metadata row beneath the header is dropped only if present.
  */
-function loadSurvey(buffer: ArrayBuffer, sourceTag: string, warnings: string[]): Row[] {
+function loadSurvey(buffer: ArrayBuffer, sourceTag: string, refLabel: string, warnings: string[]): Row[] {
   const { rows } = locateAndRead(buffer, SHEET_ANCHORS.survey, "Survey", warnings)
   const data = dropQualtricsMeta(rows, "Survey", warnings)
-  return data.map((r) => ({
+  return data.map((r, i) => ({
     ...r,
     [COLS.ECODE]: standardizeEcode(r[COLS.ECODE]),
     _source: sourceTag,
+    // Human-readable reference to the original record, used in the audit drill-down.
+    _rowRef: `${refLabel} row ${i + 1}`,
   }))
 }
 
@@ -296,7 +300,7 @@ function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): Row[] {
   const { rows } = locateAndRead(buffer, SHEET_ANCHORS.ei, "Exit Interview", warnings)
   const data = dropQualtricsMeta(rows, "Exit Interview", warnings)
 
-  return data.map((r) => {
+  return data.map((r, i) => {
     const cleaned = { ...r }
     // Rename "Cleaned Ecode" → "Ecode" for joining
     if (COLS.EI_CLEANED_ECODE in cleaned) {
@@ -304,6 +308,7 @@ function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): Row[] {
       delete cleaned[COLS.EI_CLEANED_ECODE]
     }
     cleaned._source = "exit_interview"
+    cleaned._rowRef = `Exit Interview row ${i + 1}`
     return cleaned
   })
 }
@@ -379,15 +384,27 @@ export interface LookupAudit {
   total: number // rows that had a non-blank lookup key
   matched: number // rows whose key was found in the mapping
   blankKey: number // rows with no lookup key at all
-  unmatched: Map<string, number> // unmatched key -> number of rows
+  unmatched: Map<string, string[]> // unmatched key -> identifiers of affected rows
 }
 
 function newLookupAudit(): LookupAudit {
   return { total: 0, matched: 0, blankKey: 0, unmatched: new Map() }
 }
 
-/** Record one lookup attempt against an audit tally. */
-function recordLookup(audit: LookupAudit, rawKey: unknown, matched: boolean): void {
+/**
+ * Identifier for a single row, used to point the analyst at the exact records
+ * to triage. Prefers the Ecode; falls back to the source-file row reference
+ * (set during load) when the Ecode is blank.
+ */
+function rowRef(r: Row): string {
+  const ecode = String(r[COLS.ECODE] ?? "").trim()
+  if (ecode) return ecode
+  const ref = String((r as Row)._rowRef ?? "").trim()
+  return ref || "(unidentified row)"
+}
+
+/** Record one lookup attempt against an audit tally, remembering the affected row. */
+function recordLookup(audit: LookupAudit, rawKey: unknown, matched: boolean, rowId: string): void {
   const key = String(rawKey ?? "").trim()
   if (!key) {
     audit.blankKey++
@@ -395,7 +412,11 @@ function recordLookup(audit: LookupAudit, rawKey: unknown, matched: boolean): vo
   }
   audit.total++
   if (matched) audit.matched++
-  else audit.unmatched.set(key, (audit.unmatched.get(key) ?? 0) + 1)
+  else {
+    const rows = audit.unmatched.get(key) ?? []
+    rows.push(rowId)
+    audit.unmatched.set(key, rows)
+  }
 }
 
 // =============================================================================
@@ -410,7 +431,7 @@ function applyDeptMapping(
   return rows.map((r) => {
     const code = String(r[COLS.DEPT_INPUT_KEY] ?? "").trim().toUpperCase()
     const lookup = map.get(code)
-    recordLookup(audit, r[COLS.DEPT_INPUT_KEY], !!lookup)
+    recordLookup(audit, r[COLS.DEPT_INPUT_KEY], !!lookup, rowRef(r))
     return {
       ...r,
       Department: lookup?.dept ?? r["Department"] ?? null,
@@ -428,7 +449,7 @@ function applyGeoMapping(
   return rows.map((r) => {
     const code = Number(r[COLS.GEO_INPUT_KEY])
     const lookup = isNaN(code) ? undefined : map.get(code)
-    recordLookup(audit, r[COLS.GEO_INPUT_KEY], !!lookup)
+    recordLookup(audit, r[COLS.GEO_INPUT_KEY], !!lookup, rowRef(r))
     return {
       ...r,
       ExternalDataReference: lookup?.office ?? r["ExternalDataReference"] ?? null,
@@ -446,7 +467,7 @@ function applyPDMapping(
   return rows.map((r) => {
     const code = String(r[COLS.PD_CODE] ?? "").trim().toUpperCase()
     const lookup = map.get(code)
-    recordLookup(audit, r[COLS.PD_CODE], !!lookup)
+    recordLookup(audit, r[COLS.PD_CODE], !!lookup, rowRef(r))
     return {
       ...r,
       "Mapped Seniority": lookup?.seniority ?? r["Mapped Seniority"] ?? null,
@@ -570,14 +591,14 @@ const MAX_SAMPLES = 10
  * - ok     : every keyed row matched
  */
 function summarizeLookup(label: string, mapSize: number, audit: LookupAudit): AuditCheck {
-  const unmatchedRows = [...audit.unmatched.values()].reduce((a, b) => a + b, 0)
-  // Complete, untruncated list of every unmatched code (most-frequent first), for drill-down.
+  const unmatchedRows = [...audit.unmatched.values()].reduce((a, b) => a + b.length, 0)
+  // Complete, untruncated list of every unmatched code (most-affected first), for drill-down.
   const issues: AuditIssue[] = [...audit.unmatched.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([value, rowCount]) => ({ value, rowCount }))
+    .map(([value, rows]) => ({ value, rowCount: rows.length, rows }))
+    .sort((a, b) => b.rowCount - a.rowCount)
   const samples = issues
     .slice(0, MAX_SAMPLES)
-    .map(({ value, rowCount }) => `${value} (${rowCount} row${rowCount === 1 ? "" : "s"})`)
+    .map(({ value, rows }) => `${value} → ${rows.slice(0, 3).join(", ")}${rows.length > 3 ? "…" : ""}`)
   const issueLabel = "Unmatched code"
 
   const blankNote = audit.blankKey > 0 ? ` ${fmtInt(audit.blankKey)} row(s) had a blank key.` : ""
@@ -645,8 +666,8 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   }
 
   // ── STEP 2: Load and stack surveys ─────────────────────────────────────
-  const oldSurvey = loadSurvey(files.oldSurvey, "departure_survey", warnings)
-  const newSurvey = loadSurvey(files.newSurvey, "departure_survey", warnings)
+  const oldSurvey = loadSurvey(files.oldSurvey, "departure_survey", "Survey 1", warnings)
+  const newSurvey = loadSurvey(files.newSurvey, "departure_survey", "Survey 2", warnings)
 
   const oldSurveyRows = oldSurvey.length
   const newSurveyRows = newSurvey.length
@@ -699,7 +720,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   const enriched = population.map((r) => {
     const ecode = String(r[COLS.ECODE] ?? "")
     const bbRow = bbByEcode.get(ecode)
-    recordLookup(bbAudit, ecode, !!bbRow)
+    recordLookup(bbAudit, ecode, !!bbRow, ecode)
     if (!bbRow) return r
     beyondBainMatched++
     // Prefix all BB columns with BB_ to avoid collisions
@@ -713,7 +734,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   // ── STEP 7: Drop internal pipeline columns ──────────────────────────────
   const finalRows = enriched.map((r) => {
-    const { _source, ...rest } = r as Row & { _source?: unknown }
+    const { _source, _rowRef, ...rest } = r as Row & { _source?: unknown; _rowRef?: unknown }
     return rest
   })
 
@@ -722,24 +743,36 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   // ── STEP 8: Assemble the audit report ───────────────────────────────────
   const checks: AuditCheck[] = []
 
-  // Blank join-key checks (rows that can never join because they have no Ecode)
-  const surveyBlankEcode = combinedSurvey.filter((r) => !String(r[COLS.ECODE] ?? "").trim()).length
-  const eiBlankEcode = combinedEI.filter((r) => !String(r[COLS.ECODE] ?? "").trim()).length
+  // Blank join-key checks (rows that can never join because they have no Ecode).
+  // The offending rows have no Ecode, so we identify them by their source-file row reference.
+  const surveyBlankRefs = combinedSurvey
+    .filter((r) => !String(r[COLS.ECODE] ?? "").trim())
+    .map((r) => rowRef(r))
+  const eiBlankRefs = combinedEI
+    .filter((r) => !String(r[COLS.ECODE] ?? "").trim())
+    .map((r) => rowRef(r))
   checks.push({
     label: "Survey join key (Ecode)",
-    status: surveyBlankEcode > 0 ? "warning" : "ok",
+    status: surveyBlankRefs.length > 0 ? "warning" : "ok",
     detail:
-      surveyBlankEcode > 0
-        ? `${fmtInt(surveyBlankEcode)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode and were excluded from the merge.`
+      surveyBlankRefs.length > 0
+        ? `${fmtInt(surveyBlankRefs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode and were excluded from the merge.`
         : `All ${fmtInt(combinedSurvey.length)} survey rows have a valid Ecode.`,
+    samples: surveyBlankRefs.slice(0, MAX_SAMPLES),
+    issueLabel: surveyBlankRefs.length > 0 ? "Affected row" : undefined,
+    issues:
+      surveyBlankRefs.length > 0 ? surveyBlankRefs.map((ref) => ({ value: ref, rowCount: 1, rows: [ref] })) : undefined,
   })
   checks.push({
     label: "Exit Interview join key (Ecode)",
-    status: eiBlankEcode > 0 ? "warning" : "ok",
+    status: eiBlankRefs.length > 0 ? "warning" : "ok",
     detail:
-      eiBlankEcode > 0
-        ? `${fmtInt(eiBlankEcode)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode and were excluded from the merge.`
+      eiBlankRefs.length > 0
+        ? `${fmtInt(eiBlankRefs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode and were excluded from the merge.`
         : `All ${fmtInt(combinedEI.length)} exit-interview rows have a valid Ecode.`,
+    samples: eiBlankRefs.slice(0, MAX_SAMPLES),
+    issueLabel: eiBlankRefs.length > 0 ? "Affected row" : undefined,
+    issues: eiBlankRefs.length > 0 ? eiBlankRefs.map((ref) => ({ value: ref, rowCount: 1, rows: [ref] })) : undefined,
   })
 
   // Mapping lookup checks
@@ -749,8 +782,8 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   // Beyond Bain enrichment check (left join — non-matches are expected, so cap severity at warning)
   const bbIssues: AuditIssue[] = [...bbAudit.unmatched.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([value, rowCount]) => ({ value, rowCount }))
+    .map(([value, rows]) => ({ value, rowCount: rows.length, rows }))
+    .sort((a, b) => b.rowCount - a.rowCount)
   checks.push({
     label: "Beyond Bain enrichment",
     status: population.length > 0 && beyondBainMatched === 0 ? "warning" : "ok",

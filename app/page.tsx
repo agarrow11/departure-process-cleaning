@@ -28,6 +28,7 @@ interface PipelineStats {
 interface AuditIssue {
   value: string
   rowCount: number
+  rows: string[]
 }
 
 interface AuditCheck {
@@ -559,8 +560,14 @@ function AuditDrillDownModal({ check, onClose }: { check: AuditCheck; onClose: (
   const totalRows = issues.reduce((sum, it) => sum + it.rowCount, 0)
 
   const handleExportCsv = () => {
-    const header = `"${valueHeader.replace(/"/g, '""')}","Affected rows"`
-    const lines = issues.map((it) => `"${it.value.replace(/"/g, '""')}",${it.rowCount}`)
+    const esc = (v: string) => `"${v.replace(/"/g, '""')}"`
+    // Flat, triage-friendly list: one line per impacted row.
+    const header = `${esc(valueHeader)},${esc("Impacted row")}`
+    const lines: string[] = []
+    for (const it of issues) {
+      const rowList = it.rows.length === 1 && it.rows[0] === it.value ? [it.value] : it.rows
+      for (const rowId of rowList) lines.push(`${esc(it.value)},${esc(rowId)}`)
+    }
     const csv = [header, ...lines].join("\r\n")
     const blob = new Blob([csv], { type: "text/csv" })
     const safe = check.label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")
@@ -624,23 +631,50 @@ function AuditDrillDownModal({ check, onClose }: { check: AuditCheck; onClose: (
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr style={{ position: "sticky", top: 0, background: "#fafaf8" }}>
-                <th style={{ textAlign: "left", padding: "8px 20px", fontSize: 11, color: "#888", fontWeight: 700, borderBottom: "1px solid #f0f0ec" }}>
+                <th style={{ textAlign: "left", padding: "8px 20px", fontSize: 11, color: "#888", fontWeight: 700, borderBottom: "1px solid #f0f0ec", width: 160 }}>
                   {valueHeader}
                 </th>
-                <th style={{ textAlign: "right", padding: "8px 20px", fontSize: 11, color: "#888", fontWeight: 700, borderBottom: "1px solid #f0f0ec", width: 120 }}>
-                  Affected rows
+                <th style={{ textAlign: "left", padding: "8px 20px", fontSize: 11, color: "#888", fontWeight: 700, borderBottom: "1px solid #f0f0ec" }}>
+                  Impacted rows (Ecode / source row)
                 </th>
               </tr>
             </thead>
             <tbody>
-              {issues.map((it, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid #f5f5f0" }}>
-                  <td style={{ padding: "8px 20px", fontFamily: "monospace", color: "#1a1a1a" }}>
-                    {it.value || <span style={{ color: "#aaa", fontStyle: "italic" }}>(blank)</span>}
-                  </td>
-                  <td style={{ padding: "8px 20px", textAlign: "right", color: "#555" }}>{fmt(it.rowCount)}</td>
-                </tr>
-              ))}
+              {issues.map((it, i) => {
+                // For blank-key checks the value IS the row reference; avoid showing it twice.
+                const rowList = it.rows.length === 1 && it.rows[0] === it.value ? [] : it.rows
+                return (
+                  <tr key={i} style={{ borderBottom: "1px solid #f5f5f0", verticalAlign: "top" }}>
+                    <td style={{ padding: "8px 20px", fontFamily: "monospace", color: "#1a1a1a" }}>
+                      {it.value || <span style={{ color: "#aaa", fontStyle: "italic" }}>(blank)</span>}
+                    </td>
+                    <td style={{ padding: "8px 20px", color: "#555" }}>
+                      {rowList.length === 0 ? (
+                        <span style={{ color: "#aaa" }}>—</span>
+                      ) : (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                          {rowList.map((rowId, j) => (
+                            <span
+                              key={j}
+                              style={{
+                                fontFamily: "monospace",
+                                fontSize: 11,
+                                background: "#fafaf8",
+                                border: "1px solid #eee",
+                                borderRadius: 4,
+                                padding: "1px 6px",
+                                color: "#1a1a1a",
+                              }}
+                            >
+                              {rowId}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
