@@ -229,6 +229,14 @@ function locateAndRead(
   anchors: { required: string[]; optional: string[] },
   label: string,
   warnings: string[],
+  /**
+   * When set, the header is NOT content-detected but pinned to this 0-based row
+   * index. Used for the survey/EI input files, whose layout is fixed (row 1 is
+   * ignored, row 2 = headers). This prevents header-like text on row 1 from
+   * being mistaken for the header, which would otherwise pull the row-3 metadata
+   * line in as a data record.
+   */
+  fixedHeaderRow?: number,
 ): { rows: Row[]; sheetName: string; headerRow: number; matrix: unknown[][] } {
   const wb = readWorkbook(buffer)
   const allAnchors = [...anchors.required, ...anchors.optional]
@@ -238,8 +246,22 @@ function locateAndRead(
   for (const name of wb.SheetNames) {
     const matrix = sheetToMatrix(wb.Sheets[name])
     if (matrix.length === 0) continue
-    const { row, score } = detectHeaderRow(matrix, allAnchors)
+
+    // Header row: pinned (input files) or detected by content (mapping files).
+    let row: number
+    let score: number
+    if (fixedHeaderRow != null) {
+      if (matrix.length <= fixedHeaderRow) continue
+      row = fixedHeaderRow
+      const cells = new Set((matrix[row] ?? []).map(normalizeHeader))
+      score = allAnchors.reduce((acc, a) => acc + (a && cells.has(normalizeHeader(a)) ? 1 : 0), 0)
+    } else {
+      const detected = detectHeaderRow(matrix, allAnchors)
+      row = detected.row
+      score = detected.score
+    }
     if (row < 0) continue
+
     const headerCells = new Set((matrix[row] ?? []).map(normalizeHeader))
     const requiredHits = anchors.required.filter((k) => headerCells.has(normalizeHeader(k))).length
     if (
@@ -253,7 +275,8 @@ function locateAndRead(
   if (best.headerRow < 0 || best.requiredHits < anchors.required.length) {
     throw new Error(
       `Could not locate the ${label} sheet. Expected a sheet containing column(s) ` +
-        `[${anchors.required.join(", ")}]. Available sheets: ${wb.SheetNames.join(", ")}.`,
+        `[${anchors.required.join(", ")}]${fixedHeaderRow != null ? ` on row ${fixedHeaderRow + 1}` : ""}. ` +
+        `Available sheets: ${wb.SheetNames.join(", ")}.`,
     )
   }
 
@@ -310,12 +333,25 @@ function buildPositionedRows(
 }
 
 /**
+ * Fixed 0-based header row index for the survey/EI input files. Their layout is
+ * deterministic: row 1 (index 0) is ignored, row 2 (index 1) is the header,
+ * row 3 (index 2) is metadata/blank, and real data begins on row 4 (index 3).
+ */
+const INPUT_FILE_HEADER_ROW = 1
+
+/**
  * Load survey file.
- * - Sheet + header row detected automatically via the "Ecode" anchor.
- * - The Qualtrics metadata row beneath the header is dropped only if present.
+ * - Sheet detected automatically (handles date-stamped tab names).
+ * - Header pinned to row 2; the row-3 metadata/blank line is always skipped.
  */
 function loadSurvey(buffer: ArrayBuffer, sourceTag: string, refLabel: string, warnings: string[]): Row[] {
-  const { headerRow, matrix } = locateAndRead(buffer, SHEET_ANCHORS.survey, "Survey", warnings)
+  const { headerRow, matrix } = locateAndRead(
+    buffer,
+    SHEET_ANCHORS.survey,
+    "Survey",
+    warnings,
+    INPUT_FILE_HEADER_ROW,
+  )
   const positioned = buildPositionedRows(matrix, headerRow, refLabel, warnings)
   return positioned.map(({ row, excelRow }) => ({
     ...row,
@@ -329,11 +365,18 @@ function loadSurvey(buffer: ArrayBuffer, sourceTag: string, refLabel: string, wa
 
 /**
  * Load Exit Interview file.
- * - Sheet + header row detected automatically via the "Cleaned Ecode" anchor.
+ * - Sheet detected automatically via the "Cleaned Ecode" anchor.
+ * - Header pinned to row 2; the row-3 metadata/blank line is always skipped.
  * - Primary key "Cleaned Ecode" is renamed to "Ecode" for joining.
  */
 function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): Row[] {
-  const { headerRow, matrix } = locateAndRead(buffer, SHEET_ANCHORS.ei, "Exit Interview", warnings)
+  const { headerRow, matrix } = locateAndRead(
+    buffer,
+    SHEET_ANCHORS.ei,
+    "Exit Interview",
+    warnings,
+    INPUT_FILE_HEADER_ROW,
+  )
   const positioned = buildPositionedRows(matrix, headerRow, "Exit Interview", warnings)
 
   return positioned.map(({ row, excelRow }) => {
