@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useCallback } from "react"
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, AlertTriangle, XCircle, Download, Loader2, ChevronDown, ChevronUp } from "lucide-react"
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, AlertTriangle, XCircle, Download, Loader2, ChevronDown, ChevronUp, ChevronRight, X } from "lucide-react"
 
 // ── Types ──────────────────────────────────────────────────────────────────
 interface FileSlot {
@@ -25,11 +25,18 @@ interface PipelineStats {
   totalColumns: number
 }
 
+interface AuditIssue {
+  value: string
+  rowCount: number
+}
+
 interface AuditCheck {
   label: string
   status: "ok" | "warning" | "error"
   detail: string
   samples?: string[]
+  issueLabel?: string
+  issues?: AuditIssue[]
 }
 
 interface AuditReport {
@@ -139,6 +146,8 @@ export default function PipelinePage() {
   const [result, setResult] = useState<PipelineResponse | null>(null)
   const [errorMsg, setErrorMsg] = useState<string>("")
   const [showStats, setShowStats] = useState(true)
+  // The audit check the user is drilling into (null = modal closed).
+  const [drillCheck, setDrillCheck] = useState<AuditCheck | null>(null)
 
   const allFilesLoaded = FILE_SLOTS.every(s => !!files[s.key])
 
@@ -334,7 +343,7 @@ export default function PipelinePage() {
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         {result.audit.checks.map((c, i) => (
-                          <AuditRow key={i} check={c} />
+                          <AuditRow key={i} check={c} onDrillDown={() => setDrillCheck(c)} />
                         ))}
                       </div>
                     </div>
@@ -361,6 +370,9 @@ export default function PipelinePage() {
           </div>
         )}
       </div>
+
+      {/* Drill-down modal: full list of offending values for a single check */}
+      {drillCheck && <AuditDrillDownModal check={drillCheck} onClose={() => setDrillCheck(null)} />}
 
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -477,8 +489,10 @@ function AuditSummaryBadge({ audit }: { audit: AuditReport }) {
   )
 }
 
-function AuditRow({ check }: { check: AuditCheck }) {
+function AuditRow({ check, onDrillDown }: { check: AuditCheck; onDrillDown: () => void }) {
   const s = AUDIT_STYLE[check.status]
+  const issueCount = check.issues?.length ?? 0
+  const hasMore = issueCount > (check.samples?.length ?? 0)
   return (
     <div style={{ background: s.bg, border: `1px solid ${s.border}`, borderRadius: 6, padding: "10px 12px" }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
@@ -487,7 +501,7 @@ function AuditRow({ check }: { check: AuditCheck }) {
           <div style={{ fontSize: 13, fontWeight: 700, color: s.color }}>{check.label}</div>
           <div style={{ fontSize: 12, color: "#555", marginTop: 2, lineHeight: 1.5 }}>{check.detail}</div>
           {check.samples && check.samples.length > 0 && (
-            <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
+            <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
               {check.samples.map((sample, i) => (
                 <span
                   key={i}
@@ -504,8 +518,142 @@ function AuditRow({ check }: { check: AuditCheck }) {
                   {sample}
                 </span>
               ))}
+              {hasMore && (
+                <span style={{ fontSize: 11, color: "#888" }}>
+                  +{fmt(issueCount - (check.samples?.length ?? 0))} more
+                </span>
+              )}
             </div>
           )}
+          {issueCount > 0 && (
+            <button
+              onClick={onDrillDown}
+              style={{
+                marginTop: 8,
+                background: "#fff",
+                border: `1px solid ${s.border}`,
+                color: s.color,
+                borderRadius: 5,
+                padding: "4px 10px",
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              View all {fmt(issueCount)} {issueCount === 1 ? "issue" : "issues"} <ChevronRight size={13} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AuditDrillDownModal({ check, onClose }: { check: AuditCheck; onClose: () => void }) {
+  const s = AUDIT_STYLE[check.status]
+  const issues = check.issues ?? []
+  const valueHeader = check.issueLabel ?? "Value"
+  const totalRows = issues.reduce((sum, it) => sum + it.rowCount, 0)
+
+  const handleExportCsv = () => {
+    const header = `"${valueHeader.replace(/"/g, '""')}","Affected rows"`
+    const lines = issues.map((it) => `"${it.value.replace(/"/g, '""')}",${it.rowCount}`)
+    const csv = [header, ...lines].join("\r\n")
+    const blob = new Blob([csv], { type: "text/csv" })
+    const safe = check.label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")
+    downloadBlob(blob, `audit_${safe}_${exportBaseName()}.csv`)
+  }
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
+        zIndex: 50,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "#fff",
+          borderRadius: 10,
+          width: "100%",
+          maxWidth: 560,
+          maxHeight: "80vh",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+        }}
+      >
+        {/* Modal header */}
+        <div style={{ padding: "16px 20px", borderBottom: "1px solid #f0f0ec", display: "flex", alignItems: "flex-start", gap: 10 }}>
+          <s.Icon size={18} color={s.color} style={{ flexShrink: 0, marginTop: 2 }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: "#1a1a1a" }}>{check.label}</div>
+            <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
+              {fmt(issues.length)} unique {issues.length === 1 ? "value" : "values"} · {fmt(totalRows)} affected{" "}
+              {totalRows === 1 ? "row" : "rows"}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            style={{ background: "none", border: "none", cursor: "pointer", color: "#888", padding: 4, lineHeight: 0 }}
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Detail line */}
+        <div style={{ padding: "12px 20px", fontSize: 12, color: "#555", background: s.bg, lineHeight: 1.5 }}>
+          {check.detail}
+        </div>
+
+        {/* Scrollable issue table */}
+        <div style={{ overflowY: "auto", flex: 1 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ position: "sticky", top: 0, background: "#fafaf8" }}>
+                <th style={{ textAlign: "left", padding: "8px 20px", fontSize: 11, color: "#888", fontWeight: 700, borderBottom: "1px solid #f0f0ec" }}>
+                  {valueHeader}
+                </th>
+                <th style={{ textAlign: "right", padding: "8px 20px", fontSize: 11, color: "#888", fontWeight: 700, borderBottom: "1px solid #f0f0ec", width: 120 }}>
+                  Affected rows
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {issues.map((it, i) => (
+                <tr key={i} style={{ borderBottom: "1px solid #f5f5f0" }}>
+                  <td style={{ padding: "8px 20px", fontFamily: "monospace", color: "#1a1a1a" }}>
+                    {it.value || <span style={{ color: "#aaa", fontStyle: "italic" }}>(blank)</span>}
+                  </td>
+                  <td style={{ padding: "8px 20px", textAlign: "right", color: "#555" }}>{fmt(it.rowCount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Modal footer */}
+        <div style={{ padding: "12px 20px", borderTop: "1px solid #f0f0ec", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "#888" }}>Export this list to fix the source files.</span>
+          <button
+            onClick={handleExportCsv}
+            style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8 }}
+          >
+            <Download size={14} /> Export list (.csv)
+          </button>
         </div>
       </div>
     </div>

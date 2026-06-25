@@ -55,6 +55,14 @@ export interface PipelineResult {
   audit: AuditReport
 }
 
+/** One offending value found by an audit check, e.g. an unmatched code. */
+export interface AuditIssue {
+  /** The offending value (e.g. an unmatched department code, or a blank-key placeholder). */
+  value: string
+  /** How many rows were affected by this value. */
+  rowCount: number
+}
+
 /** A single data-quality / integrity check performed while running the pipeline. */
 export interface AuditCheck {
   /** Short human-readable name, e.g. "Department mapping". */
@@ -65,6 +73,10 @@ export interface AuditCheck {
   detail: string
   /** Optional concrete examples (e.g. the offending codes) to make fixing easy. */
   samples?: string[]
+  /** Header for the "value" column when drilling into the full issue list. */
+  issueLabel?: string
+  /** The COMPLETE list of offending values, for drill-down. Not truncated. */
+  issues?: AuditIssue[]
 }
 
 export interface AuditReport {
@@ -559,10 +571,14 @@ const MAX_SAMPLES = 10
  */
 function summarizeLookup(label: string, mapSize: number, audit: LookupAudit): AuditCheck {
   const unmatchedRows = [...audit.unmatched.values()].reduce((a, b) => a + b, 0)
-  const samples = [...audit.unmatched.entries()]
+  // Complete, untruncated list of every unmatched code (most-frequent first), for drill-down.
+  const issues: AuditIssue[] = [...audit.unmatched.entries()]
     .sort((a, b) => b[1] - a[1])
+    .map(([value, rowCount]) => ({ value, rowCount }))
+  const samples = issues
     .slice(0, MAX_SAMPLES)
-    .map(([code, count]) => `${code} (${count} row${count === 1 ? "" : "s"})`)
+    .map(({ value, rowCount }) => `${value} (${rowCount} row${rowCount === 1 ? "" : "s"})`)
+  const issueLabel = "Unmatched code"
 
   const blankNote = audit.blankKey > 0 ? ` ${fmtInt(audit.blankKey)} row(s) had a blank key.` : ""
 
@@ -581,6 +597,8 @@ function summarizeLookup(label: string, mapSize: number, audit: LookupAudit): Au
         `None of the ${fmtInt(audit.total)} keyed rows matched the ${label} file. ` +
         `This usually means the input key column or the mapping key column changed name.${blankNote}`,
       samples,
+      issueLabel,
+      issues,
     }
   }
   if (audit.unmatched.size > 0) {
@@ -592,6 +610,8 @@ function summarizeLookup(label: string, mapSize: number, audit: LookupAudit): Au
         `${fmtInt(unmatchedRows)} row(s) across ${fmtInt(audit.unmatched.size)} unique code(s) ` +
         `were not found in the ${label} file and need a mapping entry added.${blankNote}`,
       samples,
+      issueLabel,
+      issues,
     }
   }
   return {
@@ -728,17 +748,22 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   checks.push(summarizeLookup("PD Grade mapping", pdMap.size, mappingAudits.pd))
 
   // Beyond Bain enrichment check (left join — non-matches are expected, so cap severity at warning)
+  const bbIssues: AuditIssue[] = [...bbAudit.unmatched.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([value, rowCount]) => ({ value, rowCount }))
   checks.push({
     label: "Beyond Bain enrichment",
     status: population.length > 0 && beyondBainMatched === 0 ? "warning" : "ok",
     detail:
       population.length > 0 && beyondBainMatched === 0
         ? `No population rows matched a Beyond Bain record — verify the Ecode columns line up.`
-        : `${fmtInt(beyondBainMatched)} of ${fmtInt(population.length)} population rows were enriched with Beyond Bain data.`,
-    samples:
-      bbAudit.unmatched.size > 0
-        ? [...bbAudit.unmatched.keys()].slice(0, MAX_SAMPLES)
-        : undefined,
+        : `${fmtInt(beyondBainMatched)} of ${fmtInt(population.length)} population rows were enriched with Beyond Bain data` +
+          (bbIssues.length > 0
+            ? `; ${fmtInt(bbIssues.length)} Ecode(s) had no Beyond Bain match.`
+            : `.`),
+    samples: bbIssues.slice(0, MAX_SAMPLES).map(({ value }) => value),
+    issueLabel: bbIssues.length > 0 ? "Unenriched Ecode" : undefined,
+    issues: bbIssues.length > 0 ? bbIssues : undefined,
   })
 
   const audit: AuditReport = {
