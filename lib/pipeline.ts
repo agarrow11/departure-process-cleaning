@@ -52,6 +52,26 @@ export interface PipelineResult {
     totalColumns: number
   }
   warnings: string[]
+  audit: AuditReport
+}
+
+/** A single data-quality / integrity check performed while running the pipeline. */
+export interface AuditCheck {
+  /** Short human-readable name, e.g. "Department mapping". */
+  label: string
+  /** ok = clean, warning = ran but some rows need attention, error = check failed. */
+  status: "ok" | "warning" | "error"
+  /** Plain-English explanation of the result. */
+  detail: string
+  /** Optional concrete examples (e.g. the offending codes) to make fixing easy. */
+  samples?: string[]
+}
+
+export interface AuditReport {
+  checks: AuditCheck[]
+  okCount: number
+  warningCount: number
+  errorCount: number
 }
 
 // =============================================================================
@@ -339,16 +359,46 @@ function loadPDMapping(
 }
 
 // =============================================================================
+// LOOKUP AUDIT — tracks how many input rows matched each mapping
+// =============================================================================
+
+/** Running tally of lookup outcomes for one mapping (Dept/Geo/PD/Beyond Bain). */
+export interface LookupAudit {
+  total: number // rows that had a non-blank lookup key
+  matched: number // rows whose key was found in the mapping
+  blankKey: number // rows with no lookup key at all
+  unmatched: Map<string, number> // unmatched key -> number of rows
+}
+
+function newLookupAudit(): LookupAudit {
+  return { total: 0, matched: 0, blankKey: 0, unmatched: new Map() }
+}
+
+/** Record one lookup attempt against an audit tally. */
+function recordLookup(audit: LookupAudit, rawKey: unknown, matched: boolean): void {
+  const key = String(rawKey ?? "").trim()
+  if (!key) {
+    audit.blankKey++
+    return
+  }
+  audit.total++
+  if (matched) audit.matched++
+  else audit.unmatched.set(key, (audit.unmatched.get(key) ?? 0) + 1)
+}
+
+// =============================================================================
 // MAPPING APPLIERS
 // =============================================================================
 
 function applyDeptMapping(
   rows: Row[],
   map: Map<string, { dept: string; subFunc: string; func: string }>,
+  audit: LookupAudit,
 ): Row[] {
   return rows.map((r) => {
     const code = String(r[COLS.DEPT_INPUT_KEY] ?? "").trim().toUpperCase()
     const lookup = map.get(code)
+    recordLookup(audit, r[COLS.DEPT_INPUT_KEY], !!lookup)
     return {
       ...r,
       Department: lookup?.dept ?? r["Department"] ?? null,
@@ -361,10 +411,12 @@ function applyDeptMapping(
 function applyGeoMapping(
   rows: Row[],
   map: Map<number, { office: string; cluster: string; region: string }>,
+  audit: LookupAudit,
 ): Row[] {
   return rows.map((r) => {
     const code = Number(r[COLS.GEO_INPUT_KEY])
     const lookup = isNaN(code) ? undefined : map.get(code)
+    recordLookup(audit, r[COLS.GEO_INPUT_KEY], !!lookup)
     return {
       ...r,
       ExternalDataReference: lookup?.office ?? r["ExternalDataReference"] ?? null,
@@ -377,10 +429,12 @@ function applyGeoMapping(
 function applyPDMapping(
   rows: Row[],
   map: Map<string, { seniority: string; level: string; position: string }>,
+  audit: LookupAudit,
 ): Row[] {
   return rows.map((r) => {
     const code = String(r[COLS.PD_CODE] ?? "").trim().toUpperCase()
     const lookup = map.get(code)
+    recordLookup(audit, r[COLS.PD_CODE], !!lookup)
     return {
       ...r,
       "Mapped Seniority": lookup?.seniority ?? r["Mapped Seniority"] ?? null,
@@ -390,15 +444,23 @@ function applyPDMapping(
   })
 }
 
+/** Audit tallies for the three mapping lookups, shared across survey + EI rows. */
+export interface MappingAudits {
+  dept: LookupAudit
+  geo: LookupAudit
+  pd: LookupAudit
+}
+
 function applyAllMappings(
   rows: Row[],
   deptMap: Map<string, { dept: string; subFunc: string; func: string }>,
   geoMap: Map<number, { office: string; cluster: string; region: string }>,
   pdMap: Map<string, { seniority: string; level: string; position: string }>,
+  audits: MappingAudits,
 ): Row[] {
-  let result = applyDeptMapping(rows, deptMap)
-  result = applyGeoMapping(result, geoMap)
-  result = applyPDMapping(result, pdMap)
+  let result = applyDeptMapping(rows, deptMap, audits.dept)
+  result = applyGeoMapping(result, geoMap, audits.geo)
+  result = applyPDMapping(result, pdMap, audits.pd)
   return result
 }
 
@@ -484,6 +546,66 @@ function outerJoin(
 }
 
 // =============================================================================
+// AUDIT SUMMARY HELPERS
+// =============================================================================
+
+const MAX_SAMPLES = 10
+
+/**
+ * Turn a raw lookup tally into a human-readable audit check.
+ * - error  : the mapping never matched a single row (likely a column/sheet mismatch)
+ * - warning: some rows didn't match (codes missing from the mapping file)
+ * - ok     : every keyed row matched
+ */
+function summarizeLookup(label: string, mapSize: number, audit: LookupAudit): AuditCheck {
+  const unmatchedRows = [...audit.unmatched.values()].reduce((a, b) => a + b, 0)
+  const samples = [...audit.unmatched.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_SAMPLES)
+    .map(([code, count]) => `${code} (${count} row${count === 1 ? "" : "s"})`)
+
+  const blankNote = audit.blankKey > 0 ? ` ${fmtInt(audit.blankKey)} row(s) had a blank key.` : ""
+
+  if (mapSize === 0) {
+    return {
+      label,
+      status: "error",
+      detail: `The ${label} file loaded 0 lookup rows — check that it contains the expected key column and data.`,
+    }
+  }
+  if (audit.total > 0 && audit.matched === 0) {
+    return {
+      label,
+      status: "error",
+      detail:
+        `None of the ${fmtInt(audit.total)} keyed rows matched the ${label} file. ` +
+        `This usually means the input key column or the mapping key column changed name.${blankNote}`,
+      samples,
+    }
+  }
+  if (audit.unmatched.size > 0) {
+    return {
+      label,
+      status: "warning",
+      detail:
+        `${fmtInt(audit.matched)} of ${fmtInt(audit.total)} keyed rows matched. ` +
+        `${fmtInt(unmatchedRows)} row(s) across ${fmtInt(audit.unmatched.size)} unique code(s) ` +
+        `were not found in the ${label} file and need a mapping entry added.${blankNote}`,
+      samples,
+    }
+  }
+  return {
+    label,
+    status: "ok",
+    detail: `All ${fmtInt(audit.matched)} keyed rows matched the ${label} file.${blankNote}`,
+  }
+}
+
+function fmtInt(n: number): string {
+  return n.toLocaleString("en-US")
+}
+
+// =============================================================================
 // MAIN PIPELINE
 // =============================================================================
 
@@ -494,6 +616,13 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   const deptMap = loadDeptMapping(files.deptHierarchy, warnings)
   const geoMap = loadGeoMapping(files.geoHierarchy, warnings)
   const pdMap = loadPDMapping(files.pdGrade, warnings)
+
+  // Audit tallies shared across survey + EI rows
+  const mappingAudits: MappingAudits = {
+    dept: newLookupAudit(),
+    geo: newLookupAudit(),
+    pd: newLookupAudit(),
+  }
 
   // ── STEP 2: Load and stack surveys ─────────────────────────────────────
   const oldSurvey = loadSurvey(files.oldSurvey, "departure_survey", warnings)
@@ -521,8 +650,8 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   const combinedEI = loadExitInterview(files.exitInterview, warnings)
 
   // ── STEP 4: Apply mappings ──────────────────────────────────────────────
-  const mappedSurvey = applyAllMappings(combinedSurvey, deptMap, geoMap, pdMap)
-  const mappedEI = applyAllMappings(combinedEI, deptMap, geoMap, pdMap)
+  const mappedSurvey = applyAllMappings(combinedSurvey, deptMap, geoMap, pdMap, mappingAudits)
+  const mappedEI = applyAllMappings(combinedEI, deptMap, geoMap, pdMap, mappingAudits)
 
   // ── STEP 5: Outer join survey + EI ─────────────────────────────────────
   const { merged: population, bothCount, surveyOnlyCount, eiOnlyCount } = outerJoin(
@@ -546,9 +675,11 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   }
 
   let beyondBainMatched = 0
+  const bbAudit = newLookupAudit()
   const enriched = population.map((r) => {
     const ecode = String(r[COLS.ECODE] ?? "")
     const bbRow = bbByEcode.get(ecode)
+    recordLookup(bbAudit, ecode, !!bbRow)
     if (!bbRow) return r
     beyondBainMatched++
     // Prefix all BB columns with BB_ to avoid collisions
@@ -568,6 +699,55 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   const totalColumns = finalRows.length > 0 ? Object.keys(finalRows[0]).length : 0
 
+  // ── STEP 8: Assemble the audit report ───────────────────────────────────
+  const checks: AuditCheck[] = []
+
+  // Blank join-key checks (rows that can never join because they have no Ecode)
+  const surveyBlankEcode = combinedSurvey.filter((r) => !String(r[COLS.ECODE] ?? "").trim()).length
+  const eiBlankEcode = combinedEI.filter((r) => !String(r[COLS.ECODE] ?? "").trim()).length
+  checks.push({
+    label: "Survey join key (Ecode)",
+    status: surveyBlankEcode > 0 ? "warning" : "ok",
+    detail:
+      surveyBlankEcode > 0
+        ? `${fmtInt(surveyBlankEcode)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode and were excluded from the merge.`
+        : `All ${fmtInt(combinedSurvey.length)} survey rows have a valid Ecode.`,
+  })
+  checks.push({
+    label: "Exit Interview join key (Ecode)",
+    status: eiBlankEcode > 0 ? "warning" : "ok",
+    detail:
+      eiBlankEcode > 0
+        ? `${fmtInt(eiBlankEcode)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode and were excluded from the merge.`
+        : `All ${fmtInt(combinedEI.length)} exit-interview rows have a valid Ecode.`,
+  })
+
+  // Mapping lookup checks
+  checks.push(summarizeLookup("Department mapping", deptMap.size, mappingAudits.dept))
+  checks.push(summarizeLookup("Geography mapping", geoMap.size, mappingAudits.geo))
+  checks.push(summarizeLookup("PD Grade mapping", pdMap.size, mappingAudits.pd))
+
+  // Beyond Bain enrichment check (left join — non-matches are expected, so cap severity at warning)
+  checks.push({
+    label: "Beyond Bain enrichment",
+    status: population.length > 0 && beyondBainMatched === 0 ? "warning" : "ok",
+    detail:
+      population.length > 0 && beyondBainMatched === 0
+        ? `No population rows matched a Beyond Bain record — verify the Ecode columns line up.`
+        : `${fmtInt(beyondBainMatched)} of ${fmtInt(population.length)} population rows were enriched with Beyond Bain data.`,
+    samples:
+      bbAudit.unmatched.size > 0
+        ? [...bbAudit.unmatched.keys()].slice(0, MAX_SAMPLES)
+        : undefined,
+  })
+
+  const audit: AuditReport = {
+    checks,
+    okCount: checks.filter((c) => c.status === "ok").length,
+    warningCount: checks.filter((c) => c.status === "warning").length,
+    errorCount: checks.filter((c) => c.status === "error").length,
+  }
+
   return {
     rows: finalRows,
     stats: {
@@ -583,6 +763,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
       totalColumns,
     },
     warnings,
+    audit,
   }
 }
 

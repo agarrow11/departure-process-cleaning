@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useCallback } from "react"
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, Download, Loader2, ChevronDown, ChevronUp } from "lucide-react"
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, AlertTriangle, XCircle, Download, Loader2, ChevronDown, ChevronUp } from "lucide-react"
 
 // ── Types ──────────────────────────────────────────────────────────────────
 interface FileSlot {
@@ -25,10 +25,25 @@ interface PipelineStats {
   totalColumns: number
 }
 
+interface AuditCheck {
+  label: string
+  status: "ok" | "warning" | "error"
+  detail: string
+  samples?: string[]
+}
+
+interface AuditReport {
+  checks: AuditCheck[]
+  okCount: number
+  warningCount: number
+  errorCount: number
+}
+
 interface PipelineResponse {
   success: boolean
   stats: PipelineStats
   warnings: string[]
+  audit: AuditReport
   xlsx: string
   csv: string
   error?: string
@@ -305,6 +320,25 @@ export default function PipelinePage() {
                     <StatTile label="EI only" value={fmt(result.stats.eiOnlyCount)} />
                     <StatTile label="Beyond Bain matched" value={fmt(result.stats.beyondBainMatched)} />
                   </div>
+
+                  {/* Audit / error check */}
+                  {result.audit && (
+                    <div style={{ marginTop: 24, borderTop: "1px solid #f0f0ec", paddingTop: 16 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                        <span style={{ fontWeight: 700, fontSize: 14, color: "#1a1a1a" }}>Audit &amp; error check</span>
+                        <AuditSummaryBadge audit={result.audit} />
+                      </div>
+                      <div style={{ fontSize: 12, color: "#888", marginBottom: 12, lineHeight: 1.5 }}>
+                        Each step below is verified after the merge. Anything marked as a warning or error lists the
+                        specific values so they can be corrected in the source files.
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {result.audit.checks.map((c, i) => (
+                          <AuditRow key={i} check={c} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -404,6 +438,76 @@ function StatTile({ label, value, highlight = false }: { label: string; value: s
     }}>
       <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>{label}</div>
       <div style={{ fontSize: 18, fontWeight: 700, color: highlight ? "#CC0000" : "#1a1a1a" }}>{value}</div>
+    </div>
+  )
+}
+
+// Color + icon scheme shared by audit rows and the summary badge.
+const AUDIT_STYLE = {
+  ok: { color: "#15803D", bg: "#F0FDF4", border: "#BBF7D0", Icon: CheckCircle, word: "OK" },
+  warning: { color: "#92400E", bg: "#FFFBEB", border: "#FDE68A", Icon: AlertTriangle, word: "Warning" },
+  error: { color: "#991B1B", bg: "#FEF2F2", border: "#FECACA", Icon: XCircle, word: "Error" },
+} as const
+
+function AuditSummaryBadge({ audit }: { audit: AuditReport }) {
+  const overall: "ok" | "warning" | "error" =
+    audit.errorCount > 0 ? "error" : audit.warningCount > 0 ? "warning" : "ok"
+  const s = AUDIT_STYLE[overall]
+  const label =
+    overall === "ok"
+      ? "All checks passed"
+      : `${audit.errorCount} error${audit.errorCount === 1 ? "" : "s"} · ${audit.warningCount} warning${audit.warningCount === 1 ? "" : "s"}`
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        background: s.bg,
+        border: `1px solid ${s.border}`,
+        color: s.color,
+        borderRadius: 999,
+        padding: "3px 10px",
+        fontSize: 12,
+        fontWeight: 700,
+      }}
+    >
+      <s.Icon size={13} /> {label}
+    </span>
+  )
+}
+
+function AuditRow({ check }: { check: AuditCheck }) {
+  const s = AUDIT_STYLE[check.status]
+  return (
+    <div style={{ background: s.bg, border: `1px solid ${s.border}`, borderRadius: 6, padding: "10px 12px" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <s.Icon size={15} color={s.color} style={{ flexShrink: 0, marginTop: 1 }} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: s.color }}>{check.label}</div>
+          <div style={{ fontSize: 12, color: "#555", marginTop: 2, lineHeight: 1.5 }}>{check.detail}</div>
+          {check.samples && check.samples.length > 0 && (
+            <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {check.samples.map((sample, i) => (
+                <span
+                  key={i}
+                  style={{
+                    fontFamily: "monospace",
+                    fontSize: 11,
+                    background: "#fff",
+                    border: `1px solid ${s.border}`,
+                    color: s.color,
+                    borderRadius: 4,
+                    padding: "1px 6px",
+                  }}
+                >
+                  {sample}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

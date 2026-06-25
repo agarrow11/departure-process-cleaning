@@ -53,6 +53,7 @@ export async function POST(request: NextRequest) {
       success: true,
       stats: result.stats,
       warnings: result.warnings,
+      audit: result.audit,
       xlsx: xlsxBase64,
       csv: csvBase64,
     })
