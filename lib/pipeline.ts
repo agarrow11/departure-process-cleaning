@@ -351,7 +351,7 @@ function buildPositionedRows(
     for (let ci = 0; ci < colNames.length; ci++) {
       const key = colNames[ci]
       if (key === null) continue
-      row[key] = cells[ci] ?? null
+      row[key] = (cells[ci] as string | number | null | undefined) ?? null
     }
     out.push({ row, excelRow: mi + 1 }) // mi is 0-based; +1 = true 1-based Excel row
   }
@@ -836,6 +836,18 @@ const BB_ALLOWLIST = [
   "BB_Mapped Role Function",
 ]
 
+/**
+ * Normalize a cell value for output. SheetJS formats boolean cells (read with
+ * `raw: false`) as the strings "TRUE"/"FALSE"; the reference pandas output uses
+ * Python-style "True"/"False", so we map those two exact tokens to match. All
+ * other values (dates, numbers, text) pass through unchanged.
+ */
+function normalizeCell(v: string | number | null | undefined): string | number | null {
+  if (v === "TRUE") return "True"
+  if (v === "FALSE") return "False"
+  return v ?? null
+}
+
 /** Union of two ordered column lists: first list, then second-list items not already present. */
 function orderedUnion(a: string[], b: string[]): string[] {
   const seen = new Set(a)
@@ -928,11 +940,11 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     recordLookup(bbAudit, ecode, !!bbRow, { ecode, source: "Merged population", rowNumber: null })
     if (bbRow) beyondBainMatched++
     const out: Row = {}
-    for (const c of mergedCols) out[c] = r[c] ?? null
+    for (const c of mergedCols) out[c] = normalizeCell(r[c])
     for (const c of BB_ALLOWLIST) {
       // BB_ prefix → original Beyond Bain column name.
       const src = c.slice(3)
-      out[c] = bbRow ? (bbRow[src] ?? null) : null
+      out[c] = bbRow ? normalizeCell(bbRow[src]) : null
     }
     return out
   })
