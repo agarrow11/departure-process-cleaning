@@ -26,7 +26,9 @@ import ExcelJS from "exceljs"
 // TYPES
 // =============================================================================
 
-export type Row = Record<string, string | number | null | undefined>
+// Cells may hold native JS types because workbooks are read with raw:true and
+// cellDates:true (Date/number/boolean), in addition to strings and nulls.
+export type Row = Record<string, string | number | boolean | Date | null | undefined>
 
 export interface PipelineFiles {
   oldSurvey: ArrayBuffer
@@ -357,7 +359,7 @@ function buildPositionedRows(
     for (let ci = 0; ci < colNames.length; ci++) {
       const key = colNames[ci]
       if (key === null) continue
-      row[key] = cells[ci] ?? null
+      row[key] = (cells[ci] as Row[string]) ?? null
     }
     out.push({ row, excelRow: mi + 1 }) // mi is 0-based; +1 = true 1-based Excel row
   }
