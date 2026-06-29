@@ -659,11 +659,15 @@ function outerJoin(
   const mergedCols = [...surveyCols, ...eiOnly]
 
   // Group rows by standardized Ecode, preserving first-seen order on each side.
+  // Blank Ecodes get a UNIQUE sentinel key per row so they never match anything
+  // (mirroring pandas, where NaN keys do not join to each other).
+  let blankSeq = 0
   const group = (rows: Row[]): { map: Map<string, Row[]>; order: string[] } => {
     const map = new Map<string, Row[]>()
     const order: string[] = []
     for (const r of rows) {
-      const k = String(r[COLS.ECODE] ?? "")
+      const raw = String(r[COLS.ECODE] ?? "").trim()
+      const k = raw === "" ? `\x00blank${blankSeq++}` : raw
       let list = map.get(k)
       if (!list) {
         list = []
@@ -677,11 +681,13 @@ function outerJoin(
   const s = group(surveyRows)
   const e = group(eiRows)
 
-  const buildRow = (key: string, S?: Row, E?: Row): Row => {
+  const buildRow = (S?: Row, E?: Row): Row => {
+    // Use the real Ecode from whichever side is present (sentinel keys are internal only).
+    const ecode = String((S ?? E)?.[COLS.ECODE] ?? "")
     const row: Row = {}
     for (const c of surveyCols) {
       if (c === COLS.ECODE) {
-        row[c] = key
+        row[c] = ecode
       } else if (sharedSet.has(c)) {
         // Coalesce: survey value wins; fall back to EI only where survey is null.
         row[c] = S?.[c] ?? E?.[c] ?? null
@@ -704,14 +710,14 @@ function outerJoin(
     const sList = s.map.get(key)!
     const eList = e.map.get(key)
     if (eList && eList.length) {
-      for (const S of sList) for (const E of eList) { merged.push(buildRow(key, S, E)); bothCount++ }
+      for (const S of sList) for (const E of eList) { merged.push(buildRow(S, E)); bothCount++ }
     } else {
-      for (const S of sList) { merged.push(buildRow(key, S, undefined)); surveyOnlyCount++ }
+      for (const S of sList) { merged.push(buildRow(S, undefined)); surveyOnlyCount++ }
     }
   }
   for (const key of e.order) {
     if (seen.has(key)) continue
-    for (const E of e.map.get(key)!) { merged.push(buildRow(key, undefined, E)); eiOnlyCount++ }
+    for (const E of e.map.get(key)!) { merged.push(buildRow(undefined, E)); eiOnlyCount++ }
   }
 
   return { merged, mergedCols, bothCount, surveyOnlyCount, eiOnlyCount }
@@ -875,7 +881,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   const ei = loadExitInterview(files.exitInterview, warnings)
   const combinedEI = ei.rows
 
-  // ── STEP 4: Apply mappings ──────────────────────────────────────────────
+  // ── STEP 4: Apply mappings ───────────────────────────────────────────���──
   // Mappings overwrite/create the 9 mapped columns; append any that are new.
   const mappedSurvey = applyAllMappings(combinedSurvey, deptMap, geoMap, pdMap, mappingAudits)
   const mappedEI = applyAllMappings(combinedEI, deptMap, geoMap, pdMap, mappingAudits)
@@ -946,7 +952,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     status: surveyBlankLocs.length > 0 ? "warning" : "ok",
     detail:
       surveyBlankLocs.length > 0
-        ? `${fmtInt(surveyBlankLocs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode and were excluded from the merge.`
+        ? `${fmtInt(surveyBlankLocs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode; they remain in the output as unmatched (survey-only) rows.`
         : `All ${fmtInt(combinedSurvey.length)} survey rows have a valid Ecode.`,
     samples: surveyBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
     issueLabel: surveyBlankLocs.length > 0 ? "Issue" : undefined,
@@ -957,7 +963,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     status: eiBlankLocs.length > 0 ? "warning" : "ok",
     detail:
       eiBlankLocs.length > 0
-        ? `${fmtInt(eiBlankLocs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode and were excluded from the merge.`
+        ? `${fmtInt(eiBlankLocs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode; they remain in the output as unmatched (EI-only) rows.`
         : `All ${fmtInt(combinedEI.length)} exit-interview rows have a valid Ecode.`,
     samples: eiBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
     issueLabel: eiBlankLocs.length > 0 ? "Issue" : undefined,

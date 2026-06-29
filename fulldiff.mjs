@@ -65,3 +65,59 @@ console.log("\n=== IN REFERENCE, MISSING FROM PRODUCED ===")
 refHeader.filter((c) => !prodSet.has(c)).forEach((c) => console.log("  -", JSON.stringify(c)))
 console.log("\n=== EXTRA IN PRODUCED, NOT IN REFERENCE ===")
 prodHeader.filter((c) => !refSet.has(c)).forEach((c) => console.log("  +", JSON.stringify(c)))
+
+// Column ORDER check (only over the common columns, in sequence)
+console.log("\n=== COLUMN ORDER (first mismatch over common cols) ===")
+let orderOk = true
+const minLen = Math.min(refHeader.length, prodHeader.length)
+for (let i = 0; i < minLen; i++) {
+  if (refHeader[i] !== prodHeader[i]) {
+    console.log(`  position ${i}: ref=${JSON.stringify(refHeader[i])} prod=${JSON.stringify(prodHeader[i])}`)
+    orderOk = false
+    break
+  }
+}
+if (orderOk) console.log("  exact order match over", minLen, "columns")
+
+// Value-level comparison on matched Ecodes over common columns.
+const norm = (v) => (v == null ? "" : String(v).trim())
+const toMap = (recs, header) => {
+  const idx = header.indexOf("Ecode")
+  const m = new Map()
+  for (let r = 1; r < recs.length; r++) {
+    const obj = {}
+    for (let c = 0; c < header.length; c++) obj[header[c]] = recs[r][c]
+    const key = norm(recs[r][idx])
+    if (key && !m.has(key)) m.set(key, obj)
+  }
+  return m
+}
+const refMap = toMap(refRecs, refHeader)
+const prodMap = toMap(prod, prodHeader)
+const commonCols = refHeader.filter((c) => prodSet.has(c))
+let comparedRows = 0
+const colMismatch = new Map()
+for (const [ecode, robj] of refMap) {
+  const pobj = prodMap.get(ecode)
+  if (!pobj) continue
+  comparedRows++
+  for (const c of commonCols) {
+    if (norm(robj[c]) !== norm(pobj[c])) colMismatch.set(c, (colMismatch.get(c) || 0) + 1)
+  }
+}
+console.log("\n=== VALUE COMPARISON (matched Ecodes:", comparedRows, ") ===")
+const sorted = [...colMismatch.entries()].sort((a, b) => b[1] - a[1])
+if (sorted.length === 0) console.log("  all common-column values match on matched Ecodes")
+else { console.log("  columns with differing values (count):"); sorted.slice(0, 25).forEach(([c, n]) => console.log(`    ${n}  ${JSON.stringify(c)}`)) }
+
+// Show one concrete example for the top mismatching column
+if (sorted.length > 0) {
+  const [topCol] = sorted[0]
+  for (const [ecode, robj] of refMap) {
+    const pobj = prodMap.get(ecode)
+    if (pobj && norm(robj[topCol]) !== norm(pobj[topCol])) {
+      console.log(`\n  example Ecode ${ecode} col ${JSON.stringify(topCol)}: ref=${JSON.stringify(robj[topCol])} prod=${JSON.stringify(pobj[topCol])}`)
+      break
+    }
+  }
+}
