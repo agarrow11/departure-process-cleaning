@@ -65,3 +65,66 @@ console.log("\n=== IN REFERENCE, MISSING FROM PRODUCED ===")
 refHeader.filter((c) => !prodSet.has(c)).forEach((c) => console.log("  -", JSON.stringify(c)))
 console.log("\n=== EXTRA IN PRODUCED, NOT IN REFERENCE ===")
 prodHeader.filter((c) => !refSet.has(c)).forEach((c) => console.log("  +", JSON.stringify(c)))
+
+// Column ORDER comparison (only meaningful when sets match)
+console.log("\n=== COLUMN ORDER ===")
+let orderOk = refHeader.length === prodHeader.length
+let firstOrderDiff = -1
+for (let i = 0; i < Math.min(refHeader.length, prodHeader.length); i++) {
+  if (refHeader[i] !== prodHeader[i]) { orderOk = false; if (firstOrderDiff < 0) firstOrderDiff = i; }
+}
+console.log(orderOk ? "  IDENTICAL ORDER" : `  first order diff at index ${firstOrderDiff}: ref=${JSON.stringify(refHeader[firstOrderDiff])} prod=${JSON.stringify(prodHeader[firstOrderDiff])}`)
+
+// VALUE comparison: build maps keyed by Ecode, compare shared columns
+const ecodeIdxRef = refHeader.indexOf("Ecode")
+const ecodeIdxProd = prodHeader.indexOf("Ecode")
+const sharedCols = refHeader.filter((c) => prodSet.has(c))
+function indexByEcode(recs, header, ecodeIdx) {
+  const m = new Map()
+  for (let i = 1; i < recs.length; i++) {
+    const k = recs[i][ecodeIdx]
+    if (k && !m.has(k)) m.set(k, recs[i])
+  }
+  return m
+}
+const refByE = indexByEcode(refRecs, refHeader, ecodeIdxRef)
+const prodByE = indexByEcode(prod, prodHeader, ecodeIdxProd)
+const refColIdx = Object.fromEntries(refHeader.map((c, i) => [c, i]))
+const prodColIdx = Object.fromEntries(prodHeader.map((c, i) => [c, i]))
+let cellsCompared = 0, cellsDiff = 0
+const diffByCol = {}
+let checkedEcodes = 0
+for (const [ecode, rRow] of refByE) {
+  const pRow = prodByE.get(ecode)
+  if (!pRow) continue
+  checkedEcodes++
+  for (const c of sharedCols) {
+    if (c === "Ecode") continue
+    const rv = (rRow[refColIdx[c]] ?? "").trim()
+    const pv = (pRow[prodColIdx[c]] ?? "").trim()
+    cellsCompared++
+    if (rv !== pv) { cellsDiff++; diffByCol[c] = (diffByCol[c] || 0) + 1 }
+  }
+}
+console.log("\n=== VALUE COMPARISON (matched Ecodes, shared cols) ===")
+console.log("  ecodes compared:", checkedEcodes, "| cells compared:", cellsCompared, "| cells differing:", cellsDiff)
+const topDiffs = Object.entries(diffByCol).sort((a, b) => b[1] - a[1]).slice(0, 20)
+if (topDiffs.length) {
+  console.log("  top differing columns:")
+  topDiffs.forEach(([c, n]) => console.log(`    ${n.toString().padStart(6)}  ${JSON.stringify(c)}`))
+}
+
+// Sample concrete value pairs for the most-differing columns
+const sampleCols = ["Start Date", "End Date", "Finished", "Mapped Employee Level", "Recorded Date", "BB_Bain Departure Year (ZID7_163)"]
+console.log("\n=== SAMPLE VALUE PAIRS (ref | prod) ===")
+for (const c of sampleCols) {
+  if (!prodSet.has(c) || !refSet.has(c)) { console.log(`\n  [${c}] (not in both)`); continue }
+  console.log(`\n  [${c}]`)
+  let shown = 0
+  for (const [ecode, rRow] of refByE) {
+    const pRow = prodByE.get(ecode); if (!pRow) continue
+    const rv = (rRow[refColIdx[c]] ?? "").trim()
+    const pv = (pRow[prodColIdx[c]] ?? "").trim()
+    if (rv !== pv) { console.log(`    ${ecode}: ${JSON.stringify(rv)} | ${JSON.stringify(pv)}`); if (++shown >= 4) break }
+  }
+}

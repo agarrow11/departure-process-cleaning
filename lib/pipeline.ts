@@ -659,11 +659,18 @@ function outerJoin(
   const mergedCols = [...surveyCols, ...eiOnly]
 
   // Group rows by standardized Ecode, preserving first-seen order on each side.
-  const group = (rows: Row[]): { map: Map<string, Row[]>; order: string[] } => {
+  // Blank keys are collected separately: pandas never matches NaN to NaN, so each
+  // blank-Ecode row passes through as its own unmatched row.
+  const group = (rows: Row[]): { map: Map<string, Row[]>; order: string[]; blanks: Row[] } => {
     const map = new Map<string, Row[]>()
     const order: string[] = []
+    const blanks: Row[] = []
     for (const r of rows) {
-      const k = String(r[COLS.ECODE] ?? "")
+      const k = String(r[COLS.ECODE] ?? "").trim()
+      if (!k) {
+        blanks.push(r)
+        continue
+      }
       let list = map.get(k)
       if (!list) {
         list = []
@@ -672,7 +679,7 @@ function outerJoin(
       }
       list.push(r)
     }
-    return { map, order }
+    return { map, order, blanks }
   }
   const s = group(surveyRows)
   const e = group(eiRows)
@@ -709,10 +716,15 @@ function outerJoin(
       for (const S of sList) { merged.push(buildRow(key, S, undefined)); surveyOnlyCount++ }
     }
   }
+  // Survey rows with a blank Ecode: kept as unmatched (NaN never joins).
+  for (const S of s.blanks) { merged.push(buildRow("", S, undefined)); surveyOnlyCount++ }
+  // EI rows whose Ecode wasn't seen on the survey side.
   for (const key of e.order) {
     if (seen.has(key)) continue
     for (const E of e.map.get(key)!) { merged.push(buildRow(key, undefined, E)); eiOnlyCount++ }
   }
+  // EI rows with a blank Ecode: kept as unmatched.
+  for (const E of e.blanks) { merged.push(buildRow("", undefined, E)); eiOnlyCount++ }
 
   return { merged, mergedCols, bothCount, surveyOnlyCount, eiOnlyCount }
 }
@@ -875,7 +887,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   const ei = loadExitInterview(files.exitInterview, warnings)
   const combinedEI = ei.rows
 
-  // ── STEP 4: Apply mappings ──────────────────────────────────────────────
+  // ── STEP 4: Apply mappings ───────────────────────────────────────────���──
   // Mappings overwrite/create the 9 mapped columns; append any that are new.
   const mappedSurvey = applyAllMappings(combinedSurvey, deptMap, geoMap, pdMap, mappingAudits)
   const mappedEI = applyAllMappings(combinedEI, deptMap, geoMap, pdMap, mappingAudits)
@@ -946,7 +958,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     status: surveyBlankLocs.length > 0 ? "warning" : "ok",
     detail:
       surveyBlankLocs.length > 0
-        ? `${fmtInt(surveyBlankLocs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode and were excluded from the merge.`
+        ? `${fmtInt(surveyBlankLocs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode; they are kept as unmatched rows (a blank key never joins to the exit interviews).`
         : `All ${fmtInt(combinedSurvey.length)} survey rows have a valid Ecode.`,
     samples: surveyBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
     issueLabel: surveyBlankLocs.length > 0 ? "Issue" : undefined,
@@ -957,7 +969,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     status: eiBlankLocs.length > 0 ? "warning" : "ok",
     detail:
       eiBlankLocs.length > 0
-        ? `${fmtInt(eiBlankLocs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode and were excluded from the merge.`
+        ? `${fmtInt(eiBlankLocs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode; they are kept as unmatched rows (a blank key never joins to the surveys).`
         : `All ${fmtInt(combinedEI.length)} exit-interview rows have a valid Ecode.`,
     samples: eiBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
     issueLabel: eiBlankLocs.length > 0 ? "Issue" : undefined,
