@@ -110,14 +110,15 @@ const sorted = [...colMismatch.entries()].sort((a, b) => b[1] - a[1])
 if (sorted.length === 0) console.log("  all common-column values match on matched Ecodes")
 else { console.log("  columns with differing values (count):"); sorted.slice(0, 25).forEach(([c, n]) => console.log(`    ${n}  ${JSON.stringify(c)}`)) }
 
-// Show one concrete example for the top mismatching column
-if (sorted.length > 0) {
-  const [topCol] = sorted[0]
+// Show concrete examples for the top mismatching columns
+console.log("\n=== EXAMPLES (top differing columns) ===")
+for (const [col] of sorted.slice(0, 8)) {
+  let shown = 0
   for (const [ecode, robj] of refMap) {
     const pobj = prodMap.get(ecode)
-    if (pobj && norm(robj[topCol]) !== norm(pobj[topCol])) {
-      console.log(`\n  example Ecode ${ecode} col ${JSON.stringify(topCol)}: ref=${JSON.stringify(robj[topCol])} prod=${JSON.stringify(pobj[topCol])}`)
-      break
+    if (pobj && norm(robj[col]) !== norm(pobj[col])) {
+      console.log(`  ${JSON.stringify(col)} Ecode ${ecode}: ref=${JSON.stringify(robj[col])} prod=${JSON.stringify(pobj[col])}`)
+      if (++shown >= 2) break
     }
   }
 }

@@ -186,17 +186,23 @@ function normalizeHeader(v: unknown): string {
 }
 
 function readWorkbook(buffer: ArrayBuffer | string): XLSX.WorkBook {
+  // cellDates: true makes date-typed cells parse into JS Date objects (rather
+  // than display strings), so we can later format them pandas-style.
   return typeof buffer === "string"
-    ? XLSX.read(buffer, { type: "string" })
-    : XLSX.read(buffer, { type: "array" })
+    ? XLSX.read(buffer, { type: "string", cellDates: true })
+    : XLSX.read(buffer, { type: "array", cellDates: true })
 }
 
-/** Convert a worksheet to a raw matrix (array of rows), preserving row indices. */
+/**
+ * Convert a worksheet to a raw matrix (array of rows), preserving row indices.
+ * raw: true keeps native JS types (number, boolean, Date) instead of Excel's
+ * display strings, which lets us reproduce pandas' typed CSV formatting.
+ */
 function sheetToMatrix(ws: XLSX.WorkSheet): unknown[][] {
   return XLSX.utils.sheet_to_json(ws, {
     header: 1,
     defval: null,
-    raw: false,
+    raw: true,
     blankrows: true,
   }) as unknown[][]
 }
@@ -474,16 +480,19 @@ function loadGeoMapping(
 function loadPDMapping(
   csvBuffer: ArrayBuffer | string,
   warnings: string[],
-): Map<string, { seniority: string; level: string; position: string }> {
+): Map<string, { seniority: string; level: number | string; position: string }> {
   const { rows } = locateAndRead(csvBuffer, SHEET_ANCHORS.pd, "PD Grade", warnings)
 
-  const map = new Map<string, { seniority: string; level: string; position: string }>()
+  const map = new Map<string, { seniority: string; level: number | string; position: string }>()
   for (const r of rows) {
     const code = String(r[COLS.PD_CODE] ?? "").trim().toUpperCase()
     if (!code || map.has(code)) continue
     map.set(code, {
       seniority: String(r[COLS.PD_SENIORITY] ?? ""),
-      level: String(r[COLS.PD_LEVEL] ?? ""),
+      // Preserve the native numeric type of Employee Level so the output column
+      // renders as a float (e.g. "9.0") like the reference pandas output, where
+      // unmatched rows become NaN and upcast the whole column to float64.
+      level: (r[COLS.PD_LEVEL] ?? "") as number | string,
       position: String(r[COLS.PD_POSITION] ?? ""),
     })
   }
@@ -579,7 +588,7 @@ function applyGeoMapping(
 
 function applyPDMapping(
   rows: Row[],
-  map: Map<string, { seniority: string; level: string; position: string }>,
+  map: Map<string, { seniority: string; level: number | string; position: string }>,
   audit: LookupAudit,
 ): Row[] {
   return rows.map((r) => {
@@ -606,7 +615,7 @@ function applyAllMappings(
   rows: Row[],
   deptMap: Map<string, { dept: string; subFunc: string; func: string }>,
   geoMap: Map<number, { office: string; cluster: string; region: string }>,
-  pdMap: Map<string, { seniority: string; level: string; position: string }>,
+  pdMap: Map<string, { seniority: string; level: number | string; position: string }>,
   audits: MappingAudits,
 ): Row[] {
   let result = applyDeptMapping(rows, deptMap, audits.dept)
@@ -847,6 +856,86 @@ function ensureMappedCols(cols: string[]): string[] {
 }
 
 // =============================================================================
+// OUTPUT FORMATTING (reproduce pandas typed-CSV rendering)
+// =============================================================================
+
+/** Round a date to the nearest second (Excel serial→Date carries float error) and format it. */
+function formatDate(d: Date, dateOnly: boolean): string {
+  const r = new Date(Math.round(d.getTime() / 1000) * 1000)
+  const p = (n: number) => String(n).padStart(2, "0")
+  const ymd = `${r.getUTCFullYear()}-${p(r.getUTCMonth() + 1)}-${p(r.getUTCDate())}`
+  if (dateOnly) return ymd
+  return `${ymd} ${p(r.getUTCHours())}:${p(r.getUTCMinutes())}:${p(r.getUTCSeconds())}`
+}
+
+/** Format a single value in an "object"/mixed column the way pandas prints it. */
+function formatScalar(v: unknown): string {
+  if (v instanceof Date) return formatDate(v, false)
+  if (typeof v === "boolean") return v ? "True" : "False"
+  return String(v)
+}
+
+type ColKind = "date" | "dateOnly" | "bool" | "float" | "int" | "object"
+
+/**
+ * Render the assembled rows to strings, matching how pandas writes a typed
+ * DataFrame to CSV. Type is inferred per column across all rows:
+ *   - all-Date column  → "YYYY-MM-DD HH:MM:SS" (or date-only if every value is
+ *     midnight, mirroring pandas' column-level `_is_dates_only` behavior);
+ *   - all-boolean column → "True"/"False";
+ *   - all-number column → integer ("6") if there are no nulls and no decimals,
+ *     otherwise float ("6.0") since pandas upcasts such columns to float64;
+ *   - anything mixed → per-value rendering.
+ * Nulls are left as null so the exporters emit empty cells (pandas writes "").
+ */
+function formatRowsForOutput(rows: Row[], columns: string[]): Row[] {
+  const kind: Record<string, ColKind> = {}
+  for (const c of columns) {
+    let nonNull = 0, dates = 0, bools = 0, nums = 0
+    let anyNull = false, anyNonInt = false, allMidnight = true
+    for (const r of rows) {
+      const v = r[c]
+      if (v === null || v === undefined) { anyNull = true; continue }
+      nonNull++
+      if (v instanceof Date) {
+        dates++
+        const rr = new Date(Math.round(v.getTime() / 1000) * 1000)
+        if (rr.getUTCHours() || rr.getUTCMinutes() || rr.getUTCSeconds()) allMidnight = false
+      } else if (typeof v === "boolean") {
+        bools++
+      } else if (typeof v === "number") {
+        nums++
+        if (!Number.isInteger(v)) anyNonInt = true
+      }
+    }
+    if (nonNull === 0) kind[c] = "object"
+    else if (dates === nonNull) kind[c] = allMidnight ? "dateOnly" : "date"
+    else if (bools === nonNull) kind[c] = "bool"
+    else if (nums === nonNull) kind[c] = anyNull || anyNonInt ? "float" : "int"
+    else kind[c] = "object"
+  }
+
+  return rows.map((r) => {
+    const out: Row = {}
+    for (const c of columns) {
+      const v = r[c]
+      if (v === null || v === undefined) { out[c] = null; continue }
+      switch (kind[c]) {
+        case "date": out[c] = formatDate(v as Date, false); break
+        case "dateOnly": out[c] = formatDate(v as Date, true); break
+        case "bool": out[c] = (v as boolean) ? "True" : "False"; break
+        case "float":
+          out[c] = typeof v === "number" ? (Number.isInteger(v) ? `${v}.0` : String(v)) : String(v)
+          break
+        case "int": out[c] = String(v); break
+        default: out[c] = formatScalar(v)
+      }
+    }
+    return out
+  })
+}
+
+// =============================================================================
 // MAIN PIPELINE
 // =============================================================================
 
@@ -877,7 +966,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   // Column order = old columns, then any new-survey columns not already present.
   const surveyColsBase = orderedUnion(oldSurvey.columns, newSurvey.columns)
 
-  // ── STEP 3: Load exit interview ─────────────────────────────────────────
+  // ── STEP 3: Load exit interview ─────��───────────────────────────────────
   const ei = loadExitInterview(files.exitInterview, warnings)
   const combinedEI = ei.rows
 
@@ -916,7 +1005,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   // ── STEP 7: Assemble final rows against a single fixed column schema ─────
   const finalColumns = [...mergedCols, ...BB_ALLOWLIST]
-  const finalRows = population.map((r) => {
+  const assembledRows = population.map((r) => {
     const ecode = String(r[COLS.ECODE] ?? "")
     const bbRow = bbByEcode.get(ecode)
     recordLookup(bbAudit, ecode, !!bbRow, { ecode, source: "Merged population", rowNumber: null })
@@ -930,6 +1019,9 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     }
     return out
   })
+
+  // Render native values (Date/number/boolean) to strings the pandas way.
+  const finalRows = formatRowsForOutput(assembledRows, finalColumns)
 
   const totalColumns = finalColumns.length
 
