@@ -26,9 +26,7 @@ import ExcelJS from "exceljs"
 // TYPES
 // =============================================================================
 
-// Cells may hold native JS types because workbooks are read with raw:true and
-// cellDates:true (Date/number/boolean), in addition to strings and nulls.
-export type Row = Record<string, string | number | boolean | Date | null | undefined>
+export type Row = Record<string, string | number | null | undefined>
 
 export interface PipelineFiles {
   oldSurvey: ArrayBuffer
@@ -188,23 +186,17 @@ function normalizeHeader(v: unknown): string {
 }
 
 function readWorkbook(buffer: ArrayBuffer | string): XLSX.WorkBook {
-  // cellDates: true makes date-typed cells parse into JS Date objects (rather
-  // than display strings), so we can later format them pandas-style.
   return typeof buffer === "string"
-    ? XLSX.read(buffer, { type: "string", cellDates: true })
-    : XLSX.read(buffer, { type: "array", cellDates: true })
+    ? XLSX.read(buffer, { type: "string" })
+    : XLSX.read(buffer, { type: "array" })
 }
 
-/**
- * Convert a worksheet to a raw matrix (array of rows), preserving row indices.
- * raw: true keeps native JS types (number, boolean, Date) instead of Excel's
- * display strings, which lets us reproduce pandas' typed CSV formatting.
- */
+/** Convert a worksheet to a raw matrix (array of rows), preserving row indices. */
 function sheetToMatrix(ws: XLSX.WorkSheet): unknown[][] {
   return XLSX.utils.sheet_to_json(ws, {
     header: 1,
     defval: null,
-    raw: true,
+    raw: false,
     blankrows: true,
   }) as unknown[][]
 }
@@ -359,7 +351,7 @@ function buildPositionedRows(
     for (let ci = 0; ci < colNames.length; ci++) {
       const key = colNames[ci]
       if (key === null) continue
-      row[key] = (cells[ci] as Row[string]) ?? null
+      row[key] = cells[ci] ?? null
     }
     out.push({ row, excelRow: mi + 1 }) // mi is 0-based; +1 = true 1-based Excel row
   }
@@ -482,19 +474,16 @@ function loadGeoMapping(
 function loadPDMapping(
   csvBuffer: ArrayBuffer | string,
   warnings: string[],
-): Map<string, { seniority: string; level: number | string; position: string }> {
+): Map<string, { seniority: string; level: string; position: string }> {
   const { rows } = locateAndRead(csvBuffer, SHEET_ANCHORS.pd, "PD Grade", warnings)
 
-  const map = new Map<string, { seniority: string; level: number | string; position: string }>()
+  const map = new Map<string, { seniority: string; level: string; position: string }>()
   for (const r of rows) {
     const code = String(r[COLS.PD_CODE] ?? "").trim().toUpperCase()
     if (!code || map.has(code)) continue
     map.set(code, {
       seniority: String(r[COLS.PD_SENIORITY] ?? ""),
-      // Preserve the native numeric type of Employee Level so the output column
-      // renders as a float (e.g. "9.0") like the reference pandas output, where
-      // unmatched rows become NaN and upcast the whole column to float64.
-      level: (r[COLS.PD_LEVEL] ?? "") as number | string,
+      level: String(r[COLS.PD_LEVEL] ?? ""),
       position: String(r[COLS.PD_POSITION] ?? ""),
     })
   }
@@ -590,7 +579,7 @@ function applyGeoMapping(
 
 function applyPDMapping(
   rows: Row[],
-  map: Map<string, { seniority: string; level: number | string; position: string }>,
+  map: Map<string, { seniority: string; level: string; position: string }>,
   audit: LookupAudit,
 ): Row[] {
   return rows.map((r) => {
@@ -617,7 +606,7 @@ function applyAllMappings(
   rows: Row[],
   deptMap: Map<string, { dept: string; subFunc: string; func: string }>,
   geoMap: Map<number, { office: string; cluster: string; region: string }>,
-  pdMap: Map<string, { seniority: string; level: number | string; position: string }>,
+  pdMap: Map<string, { seniority: string; level: string; position: string }>,
   audits: MappingAudits,
 ): Row[] {
   let result = applyDeptMapping(rows, deptMap, audits.dept)
@@ -670,15 +659,11 @@ function outerJoin(
   const mergedCols = [...surveyCols, ...eiOnly]
 
   // Group rows by standardized Ecode, preserving first-seen order on each side.
-  // Blank Ecodes get a UNIQUE sentinel key per row so they never match anything
-  // (mirroring pandas, where NaN keys do not join to each other).
-  let blankSeq = 0
   const group = (rows: Row[]): { map: Map<string, Row[]>; order: string[] } => {
     const map = new Map<string, Row[]>()
     const order: string[] = []
     for (const r of rows) {
-      const raw = String(r[COLS.ECODE] ?? "").trim()
-      const k = raw === "" ? `\x00blank${blankSeq++}` : raw
+      const k = String(r[COLS.ECODE] ?? "")
       let list = map.get(k)
       if (!list) {
         list = []
@@ -692,13 +677,11 @@ function outerJoin(
   const s = group(surveyRows)
   const e = group(eiRows)
 
-  const buildRow = (S?: Row, E?: Row): Row => {
-    // Use the real Ecode from whichever side is present (sentinel keys are internal only).
-    const ecode = String((S ?? E)?.[COLS.ECODE] ?? "")
+  const buildRow = (key: string, S?: Row, E?: Row): Row => {
     const row: Row = {}
     for (const c of surveyCols) {
       if (c === COLS.ECODE) {
-        row[c] = ecode
+        row[c] = key
       } else if (sharedSet.has(c)) {
         // Coalesce: survey value wins; fall back to EI only where survey is null.
         row[c] = S?.[c] ?? E?.[c] ?? null
@@ -721,14 +704,14 @@ function outerJoin(
     const sList = s.map.get(key)!
     const eList = e.map.get(key)
     if (eList && eList.length) {
-      for (const S of sList) for (const E of eList) { merged.push(buildRow(S, E)); bothCount++ }
+      for (const S of sList) for (const E of eList) { merged.push(buildRow(key, S, E)); bothCount++ }
     } else {
-      for (const S of sList) { merged.push(buildRow(S, undefined)); surveyOnlyCount++ }
+      for (const S of sList) { merged.push(buildRow(key, S, undefined)); surveyOnlyCount++ }
     }
   }
   for (const key of e.order) {
     if (seen.has(key)) continue
-    for (const E of e.map.get(key)!) { merged.push(buildRow(undefined, E)); eiOnlyCount++ }
+    for (const E of e.map.get(key)!) { merged.push(buildRow(key, undefined, E)); eiOnlyCount++ }
   }
 
   return { merged, mergedCols, bothCount, surveyOnlyCount, eiOnlyCount }
@@ -858,87 +841,6 @@ function ensureMappedCols(cols: string[]): string[] {
 }
 
 // =============================================================================
-// OUTPUT FORMATTING (reproduce pandas typed-CSV rendering)
-// =============================================================================
-
-/** Round a date to the nearest second (Excel serial→Date carries float error) and format it. */
-function formatDate(d: Date, dateOnly: boolean): string {
-  const r = new Date(Math.round(d.getTime() / 1000) * 1000)
-  const p = (n: number) => String(n).padStart(2, "0")
-  const ymd = `${r.getUTCFullYear()}-${p(r.getUTCMonth() + 1)}-${p(r.getUTCDate())}`
-  if (dateOnly) return ymd
-  return `${ymd} ${p(r.getUTCHours())}:${p(r.getUTCMinutes())}:${p(r.getUTCSeconds())}`
-}
-
-/** Format a single value in an "object"/mixed column the way pandas prints it. */
-function formatScalar(v: unknown): string {
-  if (v instanceof Date) return formatDate(v, false)
-  if (typeof v === "boolean") return v ? "True" : "False"
-  return String(v)
-}
-
-type ColKind = "date" | "bool" | "float" | "int" | "object"
-
-/**
- * Columns known to be float64 in the reference pandas frame due to transient
- * NaN introduced by `.map()` (unmatched lookup keys) — the dtype stays float64
- * even after the merge fills every row, so they must render as "9.0" not "9".
- */
-const FORCE_FLOAT_COLS = new Set(["Mapped Employee Level"])
-
-/**
- * Render the assembled rows to strings, matching how pandas writes a typed
- * DataFrame to CSV. Type is inferred per column across all rows:
- *   - all-Date column  → "YYYY-MM-DD HH:MM:SS" (pandas datetime64 always prints
- *     the time component, even at midnight);
- *   - all-boolean column → "True"/"False";
- *   - all-number column → integer ("6") if there are no nulls and no decimals,
- *     otherwise float ("6.0") since pandas upcasts such columns to float64;
- *   - anything mixed (object dtype) → per-value rendering, so an integer in an
- *     object column prints as "6" while a string prints verbatim.
- * Nulls are left as null so the exporters emit empty cells (pandas writes "").
- */
-function formatRowsForOutput(rows: Row[], columns: string[]): Row[] {
-  const kind: Record<string, ColKind> = {}
-  for (const c of columns) {
-    if (FORCE_FLOAT_COLS.has(c)) { kind[c] = "float"; continue }
-    let nonNull = 0, dates = 0, bools = 0, nums = 0
-    let anyNull = false, anyNonInt = false
-    for (const r of rows) {
-      const v = r[c]
-      if (v === null || v === undefined) { anyNull = true; continue }
-      nonNull++
-      if (v instanceof Date) dates++
-      else if (typeof v === "boolean") bools++
-      else if (typeof v === "number") { nums++; if (!Number.isInteger(v)) anyNonInt = true }
-    }
-    if (nonNull === 0) kind[c] = "object"
-    else if (dates === nonNull) kind[c] = "date"
-    else if (bools === nonNull) kind[c] = "bool"
-    else if (nums === nonNull) kind[c] = anyNull || anyNonInt ? "float" : "int"
-    else kind[c] = "object"
-  }
-
-  return rows.map((r) => {
-    const out: Row = {}
-    for (const c of columns) {
-      const v = r[c]
-      if (v === null || v === undefined) { out[c] = null; continue }
-      switch (kind[c]) {
-        case "date": out[c] = formatDate(v as Date, false); break
-        case "bool": out[c] = (v as boolean) ? "True" : "False"; break
-        case "float":
-          out[c] = typeof v === "number" ? (Number.isInteger(v) ? `${v}.0` : String(v)) : String(v)
-          break
-        case "int": out[c] = String(v); break
-        default: out[c] = formatScalar(v)
-      }
-    }
-    return out
-  })
-}
-
-// =============================================================================
 // MAIN PIPELINE
 // =============================================================================
 
@@ -969,11 +871,11 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   // Column order = old columns, then any new-survey columns not already present.
   const surveyColsBase = orderedUnion(oldSurvey.columns, newSurvey.columns)
 
-  // ── STEP 3: Load exit interview ─────��───────────────────────────────────
+  // ── STEP 3: Load exit interview ─────────────────────────────────────────
   const ei = loadExitInterview(files.exitInterview, warnings)
   const combinedEI = ei.rows
 
-  // ── STEP 4: Apply mappings ───────────────────────────────────────────���──
+  // ── STEP 4: Apply mappings ──────────────────────────────────────────────
   // Mappings overwrite/create the 9 mapped columns; append any that are new.
   const mappedSurvey = applyAllMappings(combinedSurvey, deptMap, geoMap, pdMap, mappingAudits)
   const mappedEI = applyAllMappings(combinedEI, deptMap, geoMap, pdMap, mappingAudits)
@@ -1008,7 +910,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   // ── STEP 7: Assemble final rows against a single fixed column schema ─────
   const finalColumns = [...mergedCols, ...BB_ALLOWLIST]
-  const assembledRows = population.map((r) => {
+  const finalRows = population.map((r) => {
     const ecode = String(r[COLS.ECODE] ?? "")
     const bbRow = bbByEcode.get(ecode)
     recordLookup(bbAudit, ecode, !!bbRow, { ecode, source: "Merged population", rowNumber: null })
@@ -1022,9 +924,6 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     }
     return out
   })
-
-  // Render native values (Date/number/boolean) to strings the pandas way.
-  const finalRows = formatRowsForOutput(assembledRows, finalColumns)
 
   const totalColumns = finalColumns.length
 
@@ -1047,7 +946,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     status: surveyBlankLocs.length > 0 ? "warning" : "ok",
     detail:
       surveyBlankLocs.length > 0
-        ? `${fmtInt(surveyBlankLocs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode; they remain in the output as unmatched (survey-only) rows.`
+        ? `${fmtInt(surveyBlankLocs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode and were excluded from the merge.`
         : `All ${fmtInt(combinedSurvey.length)} survey rows have a valid Ecode.`,
     samples: surveyBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
     issueLabel: surveyBlankLocs.length > 0 ? "Issue" : undefined,
@@ -1058,7 +957,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     status: eiBlankLocs.length > 0 ? "warning" : "ok",
     detail:
       eiBlankLocs.length > 0
-        ? `${fmtInt(eiBlankLocs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode; they remain in the output as unmatched (EI-only) rows.`
+        ? `${fmtInt(eiBlankLocs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode and were excluded from the merge.`
         : `All ${fmtInt(combinedEI.length)} exit-interview rows have a valid Ecode.`,
     samples: eiBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
     issueLabel: eiBlankLocs.length > 0 ? "Issue" : undefined,
