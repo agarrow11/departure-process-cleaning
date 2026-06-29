@@ -875,41 +875,43 @@ function formatScalar(v: unknown): string {
   return String(v)
 }
 
-type ColKind = "date" | "dateOnly" | "bool" | "float" | "int" | "object"
+type ColKind = "date" | "bool" | "float" | "int" | "object"
+
+/**
+ * Columns known to be float64 in the reference pandas frame due to transient
+ * NaN introduced by `.map()` (unmatched lookup keys) — the dtype stays float64
+ * even after the merge fills every row, so they must render as "9.0" not "9".
+ */
+const FORCE_FLOAT_COLS = new Set(["Mapped Employee Level"])
 
 /**
  * Render the assembled rows to strings, matching how pandas writes a typed
  * DataFrame to CSV. Type is inferred per column across all rows:
- *   - all-Date column  → "YYYY-MM-DD HH:MM:SS" (or date-only if every value is
- *     midnight, mirroring pandas' column-level `_is_dates_only` behavior);
+ *   - all-Date column  → "YYYY-MM-DD HH:MM:SS" (pandas datetime64 always prints
+ *     the time component, even at midnight);
  *   - all-boolean column → "True"/"False";
  *   - all-number column → integer ("6") if there are no nulls and no decimals,
  *     otherwise float ("6.0") since pandas upcasts such columns to float64;
- *   - anything mixed → per-value rendering.
+ *   - anything mixed (object dtype) → per-value rendering, so an integer in an
+ *     object column prints as "6" while a string prints verbatim.
  * Nulls are left as null so the exporters emit empty cells (pandas writes "").
  */
 function formatRowsForOutput(rows: Row[], columns: string[]): Row[] {
   const kind: Record<string, ColKind> = {}
   for (const c of columns) {
+    if (FORCE_FLOAT_COLS.has(c)) { kind[c] = "float"; continue }
     let nonNull = 0, dates = 0, bools = 0, nums = 0
-    let anyNull = false, anyNonInt = false, allMidnight = true
+    let anyNull = false, anyNonInt = false
     for (const r of rows) {
       const v = r[c]
       if (v === null || v === undefined) { anyNull = true; continue }
       nonNull++
-      if (v instanceof Date) {
-        dates++
-        const rr = new Date(Math.round(v.getTime() / 1000) * 1000)
-        if (rr.getUTCHours() || rr.getUTCMinutes() || rr.getUTCSeconds()) allMidnight = false
-      } else if (typeof v === "boolean") {
-        bools++
-      } else if (typeof v === "number") {
-        nums++
-        if (!Number.isInteger(v)) anyNonInt = true
-      }
+      if (v instanceof Date) dates++
+      else if (typeof v === "boolean") bools++
+      else if (typeof v === "number") { nums++; if (!Number.isInteger(v)) anyNonInt = true }
     }
     if (nonNull === 0) kind[c] = "object"
-    else if (dates === nonNull) kind[c] = allMidnight ? "dateOnly" : "date"
+    else if (dates === nonNull) kind[c] = "date"
     else if (bools === nonNull) kind[c] = "bool"
     else if (nums === nonNull) kind[c] = anyNull || anyNonInt ? "float" : "int"
     else kind[c] = "object"
@@ -922,7 +924,6 @@ function formatRowsForOutput(rows: Row[], columns: string[]): Row[] {
       if (v === null || v === undefined) { out[c] = null; continue }
       switch (kind[c]) {
         case "date": out[c] = formatDate(v as Date, false); break
-        case "dateOnly": out[c] = formatDate(v as Date, true); break
         case "bool": out[c] = (v as boolean) ? "True" : "False"; break
         case "float":
           out[c] = typeof v === "number" ? (Number.isInteger(v) ? `${v}.0` : String(v)) : String(v)
