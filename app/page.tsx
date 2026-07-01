@@ -60,6 +60,7 @@ interface PipelineResponse {
   audit: AuditReport
   xlsx: string
   csv: string
+  ecodeMap: string
   error?: string
 }
 
@@ -200,6 +201,12 @@ export default function PipelinePage() {
     if (!result) return
     const blob = base64ToBlob(result.csv, "text/csv")
     downloadBlob(blob, `${exportBaseName()}.csv`)
+  }
+
+  const handleDownloadMapping = () => {
+    if (!result) return
+    const blob = base64ToBlob(result.ecodeMap, "text/csv")
+    downloadBlob(blob, `${exportBaseName()}_ecode_mapping.csv`)
   }
 
   return (
@@ -374,9 +381,18 @@ export default function PipelinePage() {
                 <Download size={16} /> Download .csv
               </button>
             </div>
+            <button
+              onClick={handleDownloadMapping}
+              style={{ marginTop: 12, width: "100%", background: "#fff", color: "#1a1a1a", border: "1px solid #1a1a1a", borderRadius: 6, padding: "14px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+            >
+              <Download size={16} /> Download Ecode mapping (.csv)
+            </button>
             <div style={{ marginTop: 8, fontSize: 12, color: "#888", display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ display: "inline-block", width: 12, height: 12, background: "#FFEB3B", border: "1px solid #e0cf00", borderRadius: 2 }} />
               Cells highlighted yellow in the .xlsx are unresolved lookups (blank mapped values) that need attention. CSV has no highlighting.
+            </div>
+            <div style={{ marginTop: 6, fontSize: 12, color: "#888" }}>
+              The Ecode column in the output is anonymized with a unique 5-digit code. Use the Ecode mapping file to trace each code back to its original Ecode. Keep this file secure.
             </div>
           </div>
         )}

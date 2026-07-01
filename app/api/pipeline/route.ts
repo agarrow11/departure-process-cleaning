@@ -44,10 +44,13 @@ export async function POST(request: NextRequest) {
     // ── Generate XLSX output ──────────────────────────────────────────────
     const xlsxBuffer = await rowsToXLSX(result.rows)
     const csvString  = rowsToCSV(result.rows)
+    // Ecode anonymization mapping (traceability): original Ecode ↔ 5-digit code.
+    const mappingCsv = rowsToCSV(result.ecodeMap)
 
     // Encode outputs as base64 to return in JSON alongside stats
     const xlsxBase64 = Buffer.from(xlsxBuffer).toString("base64")
     const csvBase64  = Buffer.from(csvString).toString("base64")
+    const mappingBase64 = Buffer.from(mappingCsv).toString("base64")
 
     return NextResponse.json({
       success: true,
@@ -56,6 +59,7 @@ export async function POST(request: NextRequest) {
       audit: result.audit,
       xlsx: xlsxBase64,
       csv: csvBase64,
+      ecodeMap: mappingBase64,
     })
 
   } catch (err: unknown) {

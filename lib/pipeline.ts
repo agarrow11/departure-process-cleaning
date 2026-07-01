@@ -40,6 +40,8 @@ export interface PipelineFiles {
 
 export interface PipelineResult {
   rows: Row[]
+  /** Ecode anonymization mapping: one row per unique original Ecode → 5-digit code. */
+  ecodeMap: Row[]
   stats: {
     oldSurveyRows: number
     newSurveyRows: number
@@ -109,6 +111,10 @@ const COLS = {
 
   // Exit Interview
   EI_CLEANED_ECODE: "Cleaned Ecode",
+  // Free-text interviewer-entered ecode (PII duplicate of the join key). Dropped
+  // from the output after the files are linked so no raw ecode leaks through.
+  EI_INTERVIEWER_ECODE:
+    "[For interviewer] Please provide information on the departing employee - Employee ecode:",
 
   // Beyond Bain
   BB_ECODE: "E-code (ZID11_48)",
@@ -186,19 +192,59 @@ function normalizeHeader(v: unknown): string {
 }
 
 function readWorkbook(buffer: ArrayBuffer | string): XLSX.WorkBook {
+  // `cellDates: true` makes SheetJS parse date-formatted cells into JS Date
+  // objects, which lets sheetToMatrix detect dates by type (not by column name)
+  // and normalize them all to a single MM/DD/YYYY format. It does not change how
+  // non-date cells are read.
   return typeof buffer === "string"
-    ? XLSX.read(buffer, { type: "string" })
-    : XLSX.read(buffer, { type: "array" })
+    ? XLSX.read(buffer, { type: "string", cellDates: true })
+    : XLSX.read(buffer, { type: "array", cellDates: true })
 }
 
-/** Convert a worksheet to a raw matrix (array of rows), preserving row indices. */
+/**
+ * Format a spreadsheet date as MM/DD/YYYY.
+ * SheetJS parses Excel dates as UTC-naive datetimes and can introduce sub-second
+ * rounding (e.g. 00:50 stored as 00:49:59.999). We round to the nearest second
+ * and read UTC components so the calendar date never drifts across midnight or
+ * shifts with the server's local timezone.
+ */
+function formatDateMDY(d: Date): string {
+  const rounded = new Date(Math.round(d.getTime() / 1000) * 1000)
+  const mm = String(rounded.getUTCMonth() + 1).padStart(2, "0")
+  const dd = String(rounded.getUTCDate()).padStart(2, "0")
+  const yyyy = rounded.getUTCFullYear()
+  return `${mm}/${dd}/${yyyy}`
+}
+
+/**
+ * Convert a worksheet to a raw matrix (array of rows), preserving row indices.
+ *
+ * Uses two aligned passes over the same sheet:
+ *   • a formatted pass (raw:false) that yields the display strings used for all
+ *     non-date cells (unchanged behavior), and
+ *   • a typed pass (raw:true) where date-formatted cells surface as JS Date
+ *     objects (because the workbook is read with cellDates:true).
+ * Wherever the typed pass reports a Date, that cell is replaced with a uniform
+ * MM/DD/YYYY string. Every other cell keeps its formatted value exactly, so this
+ * only changes date fields and leaves numbers, booleans, and text untouched.
+ */
 function sheetToMatrix(ws: XLSX.WorkSheet): unknown[][] {
-  return XLSX.utils.sheet_to_json(ws, {
-    header: 1,
-    defval: null,
-    raw: false,
-    blankrows: true,
-  }) as unknown[][]
+  const opts = { header: 1, defval: null, blankrows: true } as const
+  const formatted = XLSX.utils.sheet_to_json(ws, { ...opts, raw: false }) as unknown[][]
+  const typed = XLSX.utils.sheet_to_json(ws, { ...opts, raw: true }) as unknown[][]
+
+  for (let r = 0; r < formatted.length; r++) {
+    const typedRow = typed[r]
+    const outRow = formatted[r]
+    if (!typedRow || !outRow) continue
+    for (let c = 0; c < typedRow.length; c++) {
+      const tv = typedRow[c]
+      if (tv instanceof Date && !Number.isNaN(tv.getTime())) {
+        outRow[c] = formatDateMDY(tv)
+      }
+    }
+  }
+  return formatted
 }
 
 /**
@@ -411,8 +457,18 @@ function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): { rows: Row
   )
   const { rows: positioned, columns: rawCols } = buildPositionedRows(matrix, headerRow, "Exit Interview", warnings)
 
-  // Rename "Cleaned Ecode" → "Ecode" IN PLACE (pandas rename preserves order).
-  const columns = rawCols.map((c) => (c === COLS.EI_CLEANED_ECODE ? COLS.ECODE : c))
+  // Rename "Cleaned Ecode" → "Ecode" IN PLACE (pandas rename preserves order),
+  // and drop the free-text interviewer ecode column (PII duplicate of the key).
+  const droppedInterviewerEcode = rawCols.includes(COLS.EI_INTERVIEWER_ECODE)
+  const columns = rawCols
+    .map((c) => (c === COLS.EI_CLEANED_ECODE ? COLS.ECODE : c))
+    .filter((c) => c !== COLS.EI_INTERVIEWER_ECODE)
+
+  if (droppedInterviewerEcode) {
+    warnings.push(
+      "Exit Interview: removed the free-text interviewer ecode column from the output (raw ecode / PII).",
+    )
+  }
 
   const rows = positioned.map(({ row, excelRow }) => {
     const cleaned = { ...row }
@@ -420,6 +476,8 @@ function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): { rows: Row
       cleaned[COLS.ECODE] = standardizeEcode(cleaned[COLS.EI_CLEANED_ECODE])
       delete cleaned[COLS.EI_CLEANED_ECODE]
     }
+    // Drop the interviewer free-text ecode so no raw ecode survives to output.
+    delete cleaned[COLS.EI_INTERVIEWER_ECODE]
     cleaned._source = "exit_interview"
     cleaned._srcFile = "Exit Interview"
     cleaned._srcRow = excelRow
@@ -848,6 +906,66 @@ function normalizeCell(v: string | number | null | undefined): string | number |
   return v ?? null
 }
 
+/** Column headers for the Ecode anonymization mapping export. */
+const ANON_CODE_COL = "Anonymized Code"
+const ANON_ECODE_COL = "Original Ecode"
+
+/**
+ * Anonymize the Ecode column: assign each UNIQUE non-blank Ecode a unique random
+ * 5-digit code, rewrite the Ecode column of every row in place, and return the
+ * traceability mapping rows (Anonymized Code → Original Ecode).
+ *
+ * Notes:
+ *   • Rows sharing the same Ecode (e.g. a survey/EI match) get the same code, so
+ *     the join relationship is preserved.
+ *   • Blank Ecodes are left blank — there is nothing to anonymize.
+ *   • 5-digit codes span 10000–99999 (90,000 values); we guard against overflow.
+ */
+function anonymizeEcodes(rows: Row[]): Row[] {
+  // Unique non-blank Ecodes, in first-seen order.
+  const uniqueEcodes: string[] = []
+  const seen = new Set<string>()
+  for (const r of rows) {
+    const e = String(r[COLS.ECODE] ?? "").trim()
+    if (e && !seen.has(e)) {
+      seen.add(e)
+      uniqueEcodes.push(e)
+    }
+  }
+
+  if (uniqueEcodes.length > 90000) {
+    throw new Error(
+      `Cannot anonymize with 5-digit codes: ${uniqueEcodes.length} unique Ecodes exceed the 90,000 available codes.`,
+    )
+  }
+
+  // Assign a unique random 5-digit code to each unique Ecode.
+  const usedCodes = new Set<string>()
+  const codeFor = new Map<string, string>()
+  const genCode = (): string => {
+    for (;;) {
+      const c = String(Math.floor(10000 + Math.random() * 90000)) // 10000–99999, always 5 digits
+      if (!usedCodes.has(c)) {
+        usedCodes.add(c)
+        return c
+      }
+    }
+  }
+  for (const e of uniqueEcodes) codeFor.set(e, genCode())
+
+  // Rewrite the Ecode column in place.
+  for (const r of rows) {
+    const e = String(r[COLS.ECODE] ?? "").trim()
+    if (e) r[COLS.ECODE] = codeFor.get(e)!
+  }
+
+  // Traceability mapping rows.
+  return uniqueEcodes.map((e) => ({
+    [ANON_CODE_COL]: codeFor.get(e)!,
+    [ANON_ECODE_COL]: e,
+  }))
+}
+
 /** Union of two ordered column lists: first list, then second-list items not already present. */
 function orderedUnion(a: string[], b: string[]): string[] {
   const seen = new Set(a)
@@ -949,6 +1067,9 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     return out
   })
 
+  // ── STEP 7b: Anonymize the Ecode column + build the traceability mapping ─
+  const ecodeMap = anonymizeEcodes(finalRows)
+
   const totalColumns = finalColumns.length
 
   // ── STEP 8: Assemble the audit report ───────────────────────────────────
@@ -1021,6 +1142,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   return {
     rows: finalRows,
+    ecodeMap,
     stats: {
       oldSurveyRows,
       newSurveyRows,
