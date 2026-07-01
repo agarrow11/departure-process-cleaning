@@ -43,7 +43,6 @@ export async function POST(request: NextRequest) {
 
     // ── Generate XLSX output ──────────────────────────────────────────────
     const xlsxBuffer = await rowsToXLSX(result.rows)
-    const csvString  = rowsToCSV(result.rows)
     // Ecode anonymization mapping (traceability): original Ecode ↔ 5-digit code.
     const mappingCsv = rowsToCSV(result.ecodeMap)
     // PII-redacted variants: same data with 8 blatant-PII columns removed.
@@ -53,7 +52,6 @@ export async function POST(request: NextRequest) {
 
     // Encode outputs as base64 to return in JSON alongside stats
     const xlsxBase64 = Buffer.from(xlsxBuffer).toString("base64")
-    const csvBase64  = Buffer.from(csvString).toString("base64")
     const mappingBase64 = Buffer.from(mappingCsv).toString("base64")
     const xlsxRedactedBase64 = Buffer.from(xlsxRedactedBuffer).toString("base64")
     const csvRedactedBase64  = Buffer.from(csvRedactedString).toString("base64")
@@ -64,7 +62,6 @@ export async function POST(request: NextRequest) {
       warnings: result.warnings,
       audit: result.audit,
       xlsx: xlsxBase64,
-      csv: csvBase64,
       ecodeMap: mappingBase64,
       xlsxRedacted: xlsxRedactedBase64,
       csvRedacted: csvRedactedBase64,

@@ -59,7 +59,6 @@ interface PipelineResponse {
   warnings: string[]
   audit: AuditReport
   xlsx: string
-  csv: string
   ecodeMap: string
   xlsxRedacted: string
   csvRedacted: string
@@ -197,12 +196,6 @@ export default function PipelinePage() {
     if (!result) return
     const blob = base64ToBlob(result.xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     downloadBlob(blob, `${exportBaseName()}.xlsx`)
-  }
-
-  const handleDownloadCSV = () => {
-    if (!result) return
-    const blob = base64ToBlob(result.csv, "text/csv")
-    downloadBlob(blob, `${exportBaseName()}.csv`)
   }
 
   const handleDownloadMapping = () => {
@@ -387,12 +380,6 @@ export default function PipelinePage() {
                 style={{ flex: 1, background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 6, padding: "14px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
               >
                 <Download size={16} /> Download .xlsx
-              </button>
-              <button
-                onClick={handleDownloadCSV}
-                style={{ flex: 1, background: "#fff", color: "#1a1a1a", border: "1px solid #1a1a1a", borderRadius: 6, padding: "14px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
-              >
-                <Download size={16} /> Download .csv
               </button>
             </div>
             {/* PII-redacted downloads */}
