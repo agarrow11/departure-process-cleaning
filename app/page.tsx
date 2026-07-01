@@ -61,6 +61,8 @@ interface PipelineResponse {
   xlsx: string
   csv: string
   ecodeMap: string
+  xlsxRedacted: string
+  csvRedacted: string
   error?: string
 }
 
@@ -207,6 +209,18 @@ export default function PipelinePage() {
     if (!result) return
     const blob = base64ToBlob(result.ecodeMap, "text/csv")
     downloadBlob(blob, `${exportBaseName()}_ecode_mapping.csv`)
+  }
+
+  const handleDownloadXLSXRedacted = () => {
+    if (!result) return
+    const blob = base64ToBlob(result.xlsxRedacted, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    downloadBlob(blob, `${exportBaseName()}_no_pii.xlsx`)
+  }
+
+  const handleDownloadCSVRedacted = () => {
+    if (!result) return
+    const blob = base64ToBlob(result.csvRedacted, "text/csv")
+    downloadBlob(blob, `${exportBaseName()}_no_pii.csv`)
   }
 
   return (
@@ -381,6 +395,21 @@ export default function PipelinePage() {
                 <Download size={16} /> Download .csv
               </button>
             </div>
+            {/* PII-redacted downloads */}
+            <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+              <button
+                onClick={handleDownloadXLSXRedacted}
+                style={{ flex: 1, background: "#fff", color: "#1a1a1a", border: "1px solid #1a1a1a", borderRadius: 6, padding: "14px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+              >
+                <Download size={16} /> Download .xlsx (no PII)
+              </button>
+              <button
+                onClick={handleDownloadCSVRedacted}
+                style={{ flex: 1, background: "#fff", color: "#1a1a1a", border: "1px solid #1a1a1a", borderRadius: 6, padding: "14px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+              >
+                <Download size={16} /> Download .csv (no PII)
+              </button>
+            </div>
             <button
               onClick={handleDownloadMapping}
               style={{ marginTop: 12, width: "100%", background: "#fff", color: "#1a1a1a", border: "1px solid #1a1a1a", borderRadius: 6, padding: "14px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
@@ -392,7 +421,7 @@ export default function PipelinePage() {
               Cells highlighted yellow in the .xlsx are unresolved lookups (blank mapped values) that need attention. CSV has no highlighting.
             </div>
             <div style={{ marginTop: 6, fontSize: 12, color: "#888" }}>
-              The Ecode column in the output is anonymized with a unique 5-digit code. Use the Ecode mapping file to trace each code back to its original Ecode. Keep this file secure.
+              The &quot;no PII&quot; files remove 8 columns containing names and email addresses. The Ecode column in every output is anonymized with a unique 5-digit code — use the Ecode mapping file to trace each code back to its original Ecode, and keep that file secure.
             </div>
           </div>
         )}

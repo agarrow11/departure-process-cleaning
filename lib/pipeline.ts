@@ -1239,3 +1239,34 @@ export function rowsToCSV(rows: Row[]): string {
   const ws = XLSX.utils.json_to_sheet(rows)
   return XLSX.utils.sheet_to_csv(ws)
 }
+
+/**
+ * Columns containing blatant PII (names + email addresses) to remove from the
+ * PII-redacted export. Matched by exact column name in the final output.
+ */
+export const PII_COLUMNS = [
+  "Recipient Last Name",
+  "Recipient First Name",
+  "Recipient Email",
+  "*Email address (personal):",
+  "Business / school email address:",
+  "RecipientEmail",
+  "Legal name",
+  "[For interviewer] Please provide information on the departing employee - Employee name:",
+]
+
+/**
+ * Return a copy of the rows with the PII columns removed. Every row shares the
+ * same fixed schema, so dropping these keys removes the columns from both the
+ * CSV and XLSX exports (their column order is derived from the row keys).
+ */
+export function stripPIIColumns(rows: Row[]): Row[] {
+  const drop = new Set(PII_COLUMNS)
+  return rows.map((r) => {
+    const out: Row = {}
+    for (const [k, v] of Object.entries(r)) {
+      if (!drop.has(k)) out[k] = v
+    }
+    return out
+  })
+}
