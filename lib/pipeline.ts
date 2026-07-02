@@ -676,13 +676,25 @@ function applyAllMappings(
 /**
  * Logic #1 — Beyond Bain Function Remap
  * Takes first value before semicolon in Function (ZID4_117).
- * Stores result in new column "Mapped Role Function".
+ * A person may have multiple functions separated by ";"; we keep only the first.
+ *   - The source column "Function (ZID4_117)" is cleaned IN PLACE so the output
+ *     never contains more than one function per person.
+ *   - The same first value is also stored in the new column "Mapped Role Function"
+ *     (unchanged behavior).
+ * Blank / null cells are left as-is (nothing to clean).
  */
 function applyBeyondBainLogic(rows: Row[]): Row[] {
   return rows.map((r) => {
-    const raw = String(r[COLS.BB_FUNCTION] ?? "")
-    const mapped = raw === "null" || raw === "" ? null : raw.split(";")[0].trim()
-    return { ...r, [COLS.BB_MAPPED_FUNCTION]: mapped }
+    const rawVal = r[COLS.BB_FUNCTION]
+    const raw = String(rawVal ?? "")
+    const isBlankVal = rawVal == null || raw === "" || raw === "null"
+    const first = isBlankVal ? null : raw.split(";")[0].trim()
+    return {
+      ...r,
+      // Keep only the first function in the source column (preserve blanks/nulls).
+      [COLS.BB_FUNCTION]: isBlankVal ? rawVal : first,
+      [COLS.BB_MAPPED_FUNCTION]: first,
+    }
   })
 }
 
