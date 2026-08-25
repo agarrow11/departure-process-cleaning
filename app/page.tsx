@@ -1,7 +1,8 @@
 "use client"
 
+import Link from "next/link"
 import { useState, useCallback, type CSSProperties } from "react"
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, AlertTriangle, XCircle, Download, Loader2, ChevronDown, ChevronUp, ChevronRight, X } from "lucide-react"
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, AlertTriangle, XCircle, Download, Loader2, ChevronDown, ChevronUp, ChevronRight, X, BookOpenText } from "lucide-react"
 
 // ── Types ──────────────────────────────────────────────────────────────────
 interface FileSlot {
@@ -225,6 +226,12 @@ export default function PipelinePage() {
           <div style={{ color: "#fff", fontWeight: 700, fontSize: 18 }}>Departure Data Pipeline</div>
           <div style={{ color: "#aaa", fontSize: 12, marginTop: 2 }}>Data cleaning & merge tool · Bain HR Analytics</div>
         </div>
+        <Link
+          href="/process-guide"
+          style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8, minHeight: 38, padding: "8px 12px", border: "1px solid #555", borderRadius: 5, color: "#fff", fontSize: 13, fontWeight: 700, textDecoration: "none" }}
+        >
+          <BookOpenText aria-hidden="true" size={16} /> Process guide
+        </Link>
       </div>
 
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "32px 24px" }}>
