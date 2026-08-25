@@ -53,7 +53,7 @@ const ruleRows = [
   ["Beyond Bain", "Function (ZID4_117)", "If several functions are separated by semicolons, retain only the first trimmed function.", "BB_Function (ZID4_117) + BB_Mapped Role Function", "Blank/null remains blank."],
   ["Beyond Bain", "Ecode", "Left-enrich the merged population; first Beyond Bain record per standardized Ecode wins.", "Eight BB_ fields only", "No match produces blank BB_ fields."],
   ["Final assembly", "TRUE / FALSE strings", "Normalize SheetJS uppercase boolean strings to Python-style True / False.", "Same field", "Other text is unchanged."],
-  ["Final assembly", "Ecode", "Every unique non-blank Ecode receives a random, unique five-digit code (10000–99999).", "Ecode + separate mapping file", "Blank stays blank; more than 90,000 unique Ecodes stops the run."],
+  ["Final assembly", "Ecode", "Every unique non-blank Ecode receives one random five-digit code (10000–99999); repeated rows reuse that code. A hard reconciliation compares full/no-PII rows and the mapping before files are emitted.", "Ecode + separate mapping file", "Blank stays blank and is excluded from unique counts. The run stops unless output code sets, unique originals, and mapping rows agree exactly."],
   ["PII-redacted exports", "Eight name/email fields", "Remove the exact eight approved PII columns after all joins and mappings are complete.", "175-column no-PII files in current test data", "Full XLSX retains these fields; Ecode is anonymized in every output."],
 ] as const
 
@@ -162,7 +162,7 @@ export default function ProcessGuidePage() {
               <li><span>02</span><div><strong>Upload all seven files into their named slots.</strong><p>The Run Pipeline button remains unavailable until every required file is present.</p></div></li>
               <li><span>03</span><div><strong>Check each displayed filename.</strong><p>If a file is in the wrong slot, remove it and upload the correct source before running.</p></div></li>
               <li><span>04</span><div><strong>Select Run Pipeline once.</strong><p>Keep the browser open while mappings load, surveys stack, records merge, Beyond Bain enriches, and outputs render.</p></div></li>
-              <li><span>05</span><div><strong>Read the result summary before downloading.</strong><p>Review row counts, source composition, unmatched lookup counts, duplicate-key audits, warnings, and error messages.</p></div></li>
+              <li><span>05</span><div><strong>Read the result summary before downloading.</strong><p>Review row counts, source composition, unmatched lookups, duplicate-key audits, and the Ecode anonymization integrity check. It confirms repeated rows reuse one code and all cleaned outputs reconcile to the mapping.</p></div></li>
               <li><span>06</span><div><strong>Download only the files needed for the recipient.</strong><p>Use no-PII files for ordinary sharing. Use the full XLSX only where names/emails are explicitly required. Restrict the Ecode mapping file.</p></div></li>
               <li><span>07</span><div><strong>Record the run and handoff.</strong><p>Log source dates, operator, result counts, warnings accepted, recipient, and secure storage location.</p></div></li>
             </ol>

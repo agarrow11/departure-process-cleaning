@@ -978,6 +978,103 @@ function anonymizeEcodes(rows: Row[]): Row[] {
   }))
 }
 
+export interface EcodeIntegritySummary {
+  nonBlankRows: number
+  uniqueOriginalEcodes: number
+  repeatedRows: number
+  uniqueAnonymizedCodes: number
+  mappingRows: number
+}
+
+/**
+ * Hard reconciliation for every file that carries anonymized Ecodes.
+ * Throws before output files are emitted if any invariant is broken.
+ */
+export function validateEcodeIntegrity(
+  fullRows: Row[],
+  redactedRows: Row[],
+  ecodeMap: Row[],
+): EcodeIntegritySummary {
+  if (fullRows.length !== redactedRows.length) {
+    throw new Error(
+      `Ecode integrity failed: full output has ${fullRows.length} rows but no-PII output has ${redactedRows.length}.`,
+    )
+  }
+
+  const fullCodes: string[] = []
+  const redactedCodes: string[] = []
+  for (let i = 0; i < fullRows.length; i++) {
+    const full = String(fullRows[i][COLS.ECODE] ?? "").trim()
+    const redacted = String(redactedRows[i][COLS.ECODE] ?? "").trim()
+    if (full !== redacted) {
+      throw new Error(
+        `Ecode integrity failed: full and no-PII outputs disagree at output row ${i + 1}.`,
+      )
+    }
+    if (full) {
+      if (!/^\d{5}$/.test(full) || Number(full) < 10000 || Number(full) > 99999) {
+        throw new Error(
+          `Ecode integrity failed: output row ${i + 1} has invalid anonymized Ecode ${JSON.stringify(full)}; expected 10000–99999.`,
+        )
+      }
+      fullCodes.push(full)
+      redactedCodes.push(redacted)
+    }
+  }
+
+  const mappingCodes: string[] = []
+  const mappingOriginals: string[] = []
+  for (let i = 0; i < ecodeMap.length; i++) {
+    const code = String(ecodeMap[i][ANON_CODE_COL] ?? "").trim()
+    const original = String(ecodeMap[i][ANON_ECODE_COL] ?? "").trim()
+    if (!/^\d{5}$/.test(code) || Number(code) < 10000 || Number(code) > 99999) {
+      throw new Error(
+        `Ecode integrity failed: mapping row ${i + 1} has invalid anonymized code ${JSON.stringify(code)}.`,
+      )
+    }
+    if (!original) {
+      throw new Error(`Ecode integrity failed: mapping row ${i + 1} has a blank original Ecode.`)
+    }
+    mappingCodes.push(code)
+    mappingOriginals.push(original)
+  }
+
+  const uniqueFull = new Set(fullCodes)
+  const uniqueRedacted = new Set(redactedCodes)
+  const uniqueMappingCodes = new Set(mappingCodes)
+  const uniqueMappingOriginals = new Set(mappingOriginals)
+
+  if (uniqueMappingCodes.size !== mappingCodes.length) {
+    throw new Error("Ecode integrity failed: the mapping file contains a duplicate anonymized code.")
+  }
+  if (uniqueMappingOriginals.size !== mappingOriginals.length) {
+    throw new Error("Ecode integrity failed: the mapping file contains a duplicate original Ecode.")
+  }
+  const sameSet = (a: Set<string>, b: Set<string>) =>
+    a.size === b.size && [...a].every((value) => b.has(value))
+  if (!sameSet(uniqueFull, uniqueRedacted)) {
+    throw new Error("Ecode integrity failed: full and no-PII outputs contain different anonymized-code sets.")
+  }
+  if (!sameSet(uniqueFull, uniqueMappingCodes)) {
+    throw new Error(
+      `Ecode integrity failed: cleaned outputs contain ${uniqueFull.size} unique codes but the mapping file contains ${uniqueMappingCodes.size}.`,
+    )
+  }
+  if (uniqueMappingOriginals.size !== uniqueFull.size) {
+    throw new Error(
+      `Ecode integrity failed: mapping has ${uniqueMappingOriginals.size} unique original Ecodes but cleaned outputs contain ${uniqueFull.size} unique anonymized codes.`,
+    )
+  }
+
+  return {
+    nonBlankRows: fullCodes.length,
+    uniqueOriginalEcodes: uniqueMappingOriginals.size,
+    repeatedRows: fullCodes.length - uniqueFull.size,
+    uniqueAnonymizedCodes: uniqueFull.size,
+    mappingRows: ecodeMap.length,
+  }
+}
+
 /** Union of two ordered column lists: first list, then second-list items not already present. */
 function orderedUnion(a: string[], b: string[]): string[] {
   const seen = new Set(a)
@@ -1081,6 +1178,9 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   // ── STEP 7b: Anonymize the Ecode column + build the traceability mapping ─
   const ecodeMap = anonymizeEcodes(finalRows)
+  // Derive the no-PII row set now and reconcile it against the full rows and
+  // mapping. This is a hard gate: no result is returned if the sets disagree.
+  const ecodeIntegrity = validateEcodeIntegrity(finalRows, stripPIIColumns(finalRows), ecodeMap)
 
   const totalColumns = finalColumns.length
 
@@ -1119,6 +1219,17 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     samples: eiBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
     issueLabel: eiBlankLocs.length > 0 ? "Issue" : undefined,
     issues: eiBlankLocs.length > 0 ? blankIssues(eiBlankLocs) : undefined,
+  })
+
+  checks.push({
+    label: "Ecode anonymization integrity",
+    status: "ok",
+    detail:
+      `${fmtInt(ecodeIntegrity.nonBlankRows)} non-blank output rows were checked. ` +
+      `${fmtInt(ecodeIntegrity.uniqueOriginalEcodes)} unique original Ecodes map one-to-one to ` +
+      `${fmtInt(ecodeIntegrity.uniqueAnonymizedCodes)} unique five-digit codes; ` +
+      `${fmtInt(ecodeIntegrity.repeatedRows)} repeated row occurrence(s) reuse an existing code. ` +
+      `The full XLSX, no-PII XLSX/CSV, and ${fmtInt(ecodeIntegrity.mappingRows)}-row mapping file agree exactly.`,
   })
 
   // Mapping lookup checks
