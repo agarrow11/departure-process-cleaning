@@ -40,6 +40,8 @@ export interface PipelineFiles {
 
 export interface PipelineResult {
   rows: Row[]
+  /** Ecode anonymization mapping: one row per unique original Ecode → 5-digit code. */
+  ecodeMap: Row[]
   stats: {
     oldSurveyRows: number
     newSurveyRows: number
@@ -50,6 +52,11 @@ export interface PipelineResult {
     surveyOnlyCount: number
     eiOnlyCount: number
     beyondBainMatched: number
+    exactDuplicateRowsRemoved: number
+    duplicateResponseIdGroups: number
+    duplicateResponseIdRows: number
+    duplicateEcodeGroups: number
+    duplicateEcodeRows: number
     totalColumns: number
   }
   warnings: string[]
@@ -109,6 +116,10 @@ const COLS = {
 
   // Exit Interview
   EI_CLEANED_ECODE: "Cleaned Ecode",
+  // Free-text interviewer-entered ecode (PII duplicate of the join key). Dropped
+  // from the output after the files are linked so no raw ecode leaks through.
+  EI_INTERVIEWER_ECODE:
+    "[For interviewer] Please provide information on the departing employee - Employee ecode:",
 
   // Beyond Bain
   BB_ECODE: "E-code (ZID11_48)",
@@ -186,19 +197,59 @@ function normalizeHeader(v: unknown): string {
 }
 
 function readWorkbook(buffer: ArrayBuffer | string): XLSX.WorkBook {
+  // `cellDates: true` makes SheetJS parse date-formatted cells into JS Date
+  // objects, which lets sheetToMatrix detect dates by type (not by column name)
+  // and normalize them all to a single MM/DD/YYYY format. It does not change how
+  // non-date cells are read.
   return typeof buffer === "string"
-    ? XLSX.read(buffer, { type: "string" })
-    : XLSX.read(buffer, { type: "array" })
+    ? XLSX.read(buffer, { type: "string", cellDates: true })
+    : XLSX.read(buffer, { type: "array", cellDates: true })
 }
 
-/** Convert a worksheet to a raw matrix (array of rows), preserving row indices. */
+/**
+ * Format a spreadsheet date as MM/DD/YYYY.
+ * SheetJS parses Excel dates as UTC-naive datetimes and can introduce sub-second
+ * rounding (e.g. 00:50 stored as 00:49:59.999). We round to the nearest second
+ * and read UTC components so the calendar date never drifts across midnight or
+ * shifts with the server's local timezone.
+ */
+function formatDateMDY(d: Date): string {
+  const rounded = new Date(Math.round(d.getTime() / 1000) * 1000)
+  const mm = String(rounded.getUTCMonth() + 1).padStart(2, "0")
+  const dd = String(rounded.getUTCDate()).padStart(2, "0")
+  const yyyy = rounded.getUTCFullYear()
+  return `${mm}/${dd}/${yyyy}`
+}
+
+/**
+ * Convert a worksheet to a raw matrix (array of rows), preserving row indices.
+ *
+ * Uses two aligned passes over the same sheet:
+ *   • a formatted pass (raw:false) that yields the display strings used for all
+ *     non-date cells (unchanged behavior), and
+ *   • a typed pass (raw:true) where date-formatted cells surface as JS Date
+ *     objects (because the workbook is read with cellDates:true).
+ * Wherever the typed pass reports a Date, that cell is replaced with a uniform
+ * MM/DD/YYYY string. Every other cell keeps its formatted value exactly, so this
+ * only changes date fields and leaves numbers, booleans, and text untouched.
+ */
 function sheetToMatrix(ws: XLSX.WorkSheet): unknown[][] {
-  return XLSX.utils.sheet_to_json(ws, {
-    header: 1,
-    defval: null,
-    raw: false,
-    blankrows: true,
-  }) as unknown[][]
+  const opts = { header: 1, defval: null, blankrows: true } as const
+  const formatted = XLSX.utils.sheet_to_json(ws, { ...opts, raw: false }) as unknown[][]
+  const typed = XLSX.utils.sheet_to_json(ws, { ...opts, raw: true }) as unknown[][]
+
+  for (let r = 0; r < formatted.length; r++) {
+    const typedRow = typed[r]
+    const outRow = formatted[r]
+    if (!typedRow || !outRow) continue
+    for (let c = 0; c < typedRow.length; c++) {
+      const tv = typedRow[c]
+      if (tv instanceof Date && !Number.isNaN(tv.getTime())) {
+        outRow[c] = formatDateMDY(tv)
+      }
+    }
+  }
+  return formatted
 }
 
 /**
@@ -297,39 +348,65 @@ function locateAndRead(
  * spreadsheet row number (1-based). Per the source-file structure:
  *   • the detected header sits on its row (normally Excel row 2),
  *   • the single row directly beneath it (normally Excel row 3) is always
- *     metadata or blank and is skipped — it is never a data record, and
+ *     metadata and is dropped — it is never a data record, and
  *   • real data begins on the next row (normally Excel row 4).
- * Fully-blank data rows are skipped, but numbering stays exact because it is
- * derived from the matrix index, not the position within the emitted list.
+ *
+ * This mirrors the reference pandas pipeline (`read_excel(header=1)` then
+ * `df.iloc[1:]`), including two behaviors that matter for an exact match:
+ *   1. Duplicate header names are de-collided pandas-style — the first keeps its
+ *      name, the next becomes "Name.1", then "Name.2", and so on.
+ *   2. Interior blank rows are KEPT (pandas does not drop them), so the row
+ *      count matches the reference output exactly.
+ * Returns the ordered list of (de-collided) column names alongside the rows so
+ * the caller can reproduce pandas' column ordering downstream.
  */
 function buildPositionedRows(
   matrix: unknown[][],
   headerRow: number,
   label: string,
   warnings: string[],
-): Array<{ row: Row; excelRow: number }> {
-  const headers = (matrix[headerRow] ?? []).map((h) => String(h ?? "").trim())
-  const metaRowIdx = headerRow + 1 // the "row 3" metadata/blank row — always skipped
+): { rows: Array<{ row: Row; excelRow: number }>; columns: string[] } {
+  const rawHeaders = (matrix[headerRow] ?? []).map((h) => String(h ?? "").trim())
+
+  // pandas-style duplicate-name mangling. Empty header cells are skipped
+  // (treated as unnamed and excluded), which the reference output also does.
+  const seen = new Map<string, number>()
+  const colNames: (string | null)[] = rawHeaders.map((h) => {
+    if (!h) return null
+    const n = seen.get(h) ?? 0
+    seen.set(h, n + 1)
+    return n === 0 ? h : `${h}.${n}`
+  })
+  const columns = colNames.filter((c): c is string => c !== null)
+
+  const metaRowIdx = headerRow + 1 // the "row 3" metadata row — always dropped
   const firstDataIdx = headerRow + 2 // the "row 4" first real data record
 
   if (matrix.length > metaRowIdx) {
-    warnings.push(`${label}: skipped row ${metaRowIdx + 1} (metadata/blank); data linked from row ${firstDataIdx + 1}.`)
+    warnings.push(`${label}: dropped row ${metaRowIdx + 1} (metadata); data linked from row ${firstDataIdx + 1}.`)
+  }
+
+  // Trim only fully-blank TRAILING rows (an Excel artifact); interior blanks are
+  // preserved to mirror pandas and keep the row count aligned with the reference.
+  let lastIdx = matrix.length - 1
+  while (lastIdx >= firstDataIdx) {
+    const cells = matrix[lastIdx] ?? []
+    if (cells.every((c) => c === null || c === undefined || String(c).trim() === "")) lastIdx--
+    else break
   }
 
   const out: Array<{ row: Row; excelRow: number }> = []
-  for (let mi = firstDataIdx; mi < matrix.length; mi++) {
+  for (let mi = firstDataIdx; mi <= lastIdx; mi++) {
     const cells = matrix[mi] ?? []
-    const isBlankRow = cells.every((c) => c === null || c === undefined || String(c).trim() === "")
-    if (isBlankRow) continue
     const row: Row = {}
-    for (let ci = 0; ci < headers.length; ci++) {
-      const key = headers[ci]
-      if (!key) continue // skip unnamed columns
-      if (!(key in row)) row[key] = cells[ci] ?? null
+    for (let ci = 0; ci < colNames.length; ci++) {
+      const key = colNames[ci]
+      if (key === null) continue
+      row[key] = (cells[ci] as string | number | null | undefined) ?? null
     }
     out.push({ row, excelRow: mi + 1 }) // mi is 0-based; +1 = true 1-based Excel row
   }
-  return out
+  return { rows: out, columns }
 }
 
 /**
@@ -344,7 +421,12 @@ const INPUT_FILE_HEADER_ROW = 1
  * - Sheet detected automatically (handles date-stamped tab names).
  * - Header pinned to row 2; the row-3 metadata/blank line is always skipped.
  */
-function loadSurvey(buffer: ArrayBuffer, sourceTag: string, refLabel: string, warnings: string[]): Row[] {
+function loadSurvey(
+  buffer: ArrayBuffer,
+  sourceTag: string,
+  refLabel: string,
+  warnings: string[],
+): { rows: Row[]; columns: string[] } {
   const { headerRow, matrix } = locateAndRead(
     buffer,
     SHEET_ANCHORS.survey,
@@ -352,8 +434,8 @@ function loadSurvey(buffer: ArrayBuffer, sourceTag: string, refLabel: string, wa
     warnings,
     INPUT_FILE_HEADER_ROW,
   )
-  const positioned = buildPositionedRows(matrix, headerRow, refLabel, warnings)
-  return positioned.map(({ row, excelRow }) => ({
+  const { rows: positioned, columns } = buildPositionedRows(matrix, headerRow, refLabel, warnings)
+  const rows = positioned.map(({ row, excelRow }) => ({
     ...row,
     [COLS.ECODE]: standardizeEcode(row[COLS.ECODE]),
     _source: sourceTag,
@@ -361,6 +443,7 @@ function loadSurvey(buffer: ArrayBuffer, sourceTag: string, refLabel: string, wa
     _srcFile: refLabel,
     _srcRow: excelRow,
   }))
+  return { rows, columns }
 }
 
 /**
@@ -369,7 +452,7 @@ function loadSurvey(buffer: ArrayBuffer, sourceTag: string, refLabel: string, wa
  * - Header pinned to row 2; the row-3 metadata/blank line is always skipped.
  * - Primary key "Cleaned Ecode" is renamed to "Ecode" for joining.
  */
-function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): Row[] {
+function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): { rows: Row[]; columns: string[] } {
   const { headerRow, matrix } = locateAndRead(
     buffer,
     SHEET_ANCHORS.ei,
@@ -377,20 +460,35 @@ function loadExitInterview(buffer: ArrayBuffer, warnings: string[]): Row[] {
     warnings,
     INPUT_FILE_HEADER_ROW,
   )
-  const positioned = buildPositionedRows(matrix, headerRow, "Exit Interview", warnings)
+  const { rows: positioned, columns: rawCols } = buildPositionedRows(matrix, headerRow, "Exit Interview", warnings)
 
-  return positioned.map(({ row, excelRow }) => {
+  // Rename "Cleaned Ecode" → "Ecode" IN PLACE (pandas rename preserves order),
+  // and drop the free-text interviewer ecode column (PII duplicate of the key).
+  const droppedInterviewerEcode = rawCols.includes(COLS.EI_INTERVIEWER_ECODE)
+  const columns = rawCols
+    .map((c) => (c === COLS.EI_CLEANED_ECODE ? COLS.ECODE : c))
+    .filter((c) => c !== COLS.EI_INTERVIEWER_ECODE)
+
+  if (droppedInterviewerEcode) {
+    warnings.push(
+      "Exit Interview: removed the free-text interviewer ecode column from the output (raw ecode / PII).",
+    )
+  }
+
+  const rows = positioned.map(({ row, excelRow }) => {
     const cleaned = { ...row }
-    // Rename "Cleaned Ecode" → "Ecode" for joining
     if (COLS.EI_CLEANED_ECODE in cleaned) {
       cleaned[COLS.ECODE] = standardizeEcode(cleaned[COLS.EI_CLEANED_ECODE])
       delete cleaned[COLS.EI_CLEANED_ECODE]
     }
+    // Drop the interviewer free-text ecode so no raw ecode survives to output.
+    delete cleaned[COLS.EI_INTERVIEWER_ECODE]
     cleaned._source = "exit_interview"
     cleaned._srcFile = "Exit Interview"
     cleaned._srcRow = excelRow
     return cleaned
   })
+  return { rows, columns }
 }
 
 // =============================================================================
@@ -513,11 +611,13 @@ function applyDeptMapping(
     const code = String(r[COLS.DEPT_INPUT_KEY] ?? "").trim().toUpperCase()
     const lookup = map.get(code)
     recordLookup(audit, r[COLS.DEPT_INPUT_KEY], !!lookup, rowLocator(r))
+    // pandas `key.map(...)` OVERWRITES: a missing code yields null (NaN), it does
+    // not fall back to any pre-existing value in the column.
     return {
       ...r,
-      Department: lookup?.dept ?? r["Department"] ?? null,
-      "Sub-Function": lookup?.subFunc ?? r["Sub-Function"] ?? null,
-      Function: lookup?.func ?? r["Function"] ?? null,
+      Department: lookup?.dept ?? null,
+      "Sub-Function": lookup?.subFunc ?? null,
+      Function: lookup?.func ?? null,
     }
   })
 }
@@ -533,9 +633,9 @@ function applyGeoMapping(
     recordLookup(audit, r[COLS.GEO_INPUT_KEY], !!lookup, rowLocator(r))
     return {
       ...r,
-      ExternalDataReference: lookup?.office ?? r["ExternalDataReference"] ?? null,
-      Cluster: lookup?.cluster ?? r["Cluster"] ?? null,
-      Region: lookup?.region ?? r["Region"] ?? null,
+      ExternalDataReference: lookup?.office ?? null,
+      Cluster: lookup?.cluster ?? null,
+      Region: lookup?.region ?? null,
     }
   })
 }
@@ -551,9 +651,9 @@ function applyPDMapping(
     recordLookup(audit, r[COLS.PD_CODE], !!lookup, rowLocator(r))
     return {
       ...r,
-      "Mapped Seniority": lookup?.seniority ?? r["Mapped Seniority"] ?? null,
-      "Mapped Employee Level": lookup?.level ?? r["Mapped Employee Level"] ?? null,
-      "Mapped Position": lookup?.position ?? r["Mapped Position"] ?? null,
+      "Mapped Seniority": lookup?.seniority ?? null,
+      "Mapped Employee Level": lookup?.level ?? null,
+      "Mapped Position": lookup?.position ?? null,
     }
   })
 }
@@ -581,13 +681,25 @@ function applyAllMappings(
 /**
  * Logic #1 — Beyond Bain Function Remap
  * Takes first value before semicolon in Function (ZID4_117).
- * Stores result in new column "Mapped Role Function".
+ * A person may have multiple functions separated by ";"; we keep only the first.
+ *   - The source column "Function (ZID4_117)" is cleaned IN PLACE so the output
+ *     never contains more than one function per person.
+ *   - The same first value is also stored in the new column "Mapped Role Function"
+ *     (unchanged behavior).
+ * Blank / null cells are left as-is (nothing to clean).
  */
 function applyBeyondBainLogic(rows: Row[]): Row[] {
   return rows.map((r) => {
-    const raw = String(r[COLS.BB_FUNCTION] ?? "")
-    const mapped = raw === "null" || raw === "" ? null : raw.split(";")[0].trim()
-    return { ...r, [COLS.BB_MAPPED_FUNCTION]: mapped }
+    const rawVal = r[COLS.BB_FUNCTION]
+    const raw = String(rawVal ?? "")
+    const isBlankVal = rawVal == null || raw === "" || raw === "null"
+    const first = isBlankVal ? null : raw.split(";")[0].trim()
+    return {
+      ...r,
+      // Keep only the first function in the source column (preserve blanks/nulls).
+      [COLS.BB_FUNCTION]: isBlankVal ? rawVal : first,
+      [COLS.BB_MAPPED_FUNCTION]: first,
+    }
   })
 }
 
@@ -595,68 +707,101 @@ function applyBeyondBainLogic(rows: Row[]): Row[] {
 // OUTER JOIN (Survey + EI on Ecode)
 // =============================================================================
 
+/**
+ * Outer join survey + EI on Ecode, reproducing the reference pandas merge:
+ *   - shared columns (present in both, except the key) are COALESCED with the
+ *     survey value winning and the EI value filling only where survey is null;
+ *   - EI-only columns are kept under their original names;
+ *   - the result has a single fixed column schema = survey columns (in order)
+ *     followed by EI-only columns (in order);
+ *   - duplicate Ecodes produce a cross product per key (pandas semantics).
+ */
 function outerJoin(
   surveyRows: Row[],
+  surveyCols: string[],
   eiRows: Row[],
+  eiCols: string[],
 ): {
   merged: Row[]
+  mergedCols: string[]
   bothCount: number
   surveyOnlyCount: number
   eiOnlyCount: number
 } {
-  // Index both by Ecode
-  const surveyByEcode = new Map<string, Row>()
-  for (const r of surveyRows) {
-    const key = String(r[COLS.ECODE] ?? "")
-    if (key) surveyByEcode.set(key, r)
-  }
+  const surveySet = new Set(surveyCols)
+  const eiOnly = eiCols.filter((c) => c !== COLS.ECODE && !surveySet.has(c))
+  const sharedSet = new Set(eiCols.filter((c) => c !== COLS.ECODE && surveySet.has(c)))
+  const mergedCols = [...surveyCols, ...eiOnly]
 
-  const eiByEcode = new Map<string, Row>()
-  for (const r of eiRows) {
-    const key = String(r[COLS.ECODE] ?? "")
-    if (key) eiByEcode.set(key, r)
+  // Group rows by standardized Ecode, preserving first-seen order on each side.
+  // Blank keys are collected separately: pandas never matches NaN to NaN, so each
+  // blank-Ecode row passes through as its own unmatched row.
+  const group = (rows: Row[]): { map: Map<string, Row[]>; order: string[]; blanks: Row[] } => {
+    const map = new Map<string, Row[]>()
+    const order: string[] = []
+    const blanks: Row[] = []
+    for (const r of rows) {
+      const k = String(r[COLS.ECODE] ?? "").trim()
+      if (!k) {
+        blanks.push(r)
+        continue
+      }
+      let list = map.get(k)
+      if (!list) {
+        list = []
+        map.set(k, list)
+        order.push(k)
+      }
+      list.push(r)
+    }
+    return { map, order, blanks }
+  }
+  const s = group(surveyRows)
+  const e = group(eiRows)
+
+  const buildRow = (key: string, S?: Row, E?: Row): Row => {
+    const row: Row = {}
+    for (const c of surveyCols) {
+      if (c === COLS.ECODE) {
+        row[c] = key
+      } else if (sharedSet.has(c)) {
+        // Coalesce: survey value wins; fall back to EI only where survey is null.
+        row[c] = S?.[c] ?? E?.[c] ?? null
+      } else {
+        row[c] = S?.[c] ?? null
+      }
+    }
+    for (const c of eiOnly) row[c] = E?.[c] ?? null
+    return row
   }
 
   const merged: Row[] = []
   let bothCount = 0
   let surveyOnlyCount = 0
   let eiOnlyCount = 0
+  const seen = new Set<string>()
 
-  // All ecodes across both sources
-  const allEcodes = new Set([...surveyByEcode.keys(), ...eiByEcode.keys()])
-
-  for (const ecode of allEcodes) {
-    const sRow = surveyByEcode.get(ecode)
-    const eRow = eiByEcode.get(ecode)
-
-    if (sRow && eRow) {
-      // Both sources — merge, survey wins on conflicts, EI columns prefixed with EI_
-      bothCount++
-      const merged_row: Row = { ...eRow }
-      for (const [k, v] of Object.entries(sRow)) {
-        if (k === COLS.ECODE || k === "_source") continue
-        if (k in merged_row) {
-          // Shared column: survey value wins; EI value stored as EI_<col>
-          merged_row[`EI_${k}`] = merged_row[k]
-          merged_row[k] = v ?? merged_row[k] // survey value, fall back to EI if null
-        } else {
-          merged_row[k] = v
-        }
-      }
-      merged_row[COLS.ECODE] = ecode
-      merged_row._source_survey = "departure_survey"
-      merged_row._source_ei = "exit_interview"
-      merged.push(merged_row)
-    } else if (sRow) {
-      surveyOnlyCount++
-      merged.push({ ...sRow, _source_survey: "departure_survey" })
-    } else if (eRow) {
-      eiOnlyCount++
-      merged.push({ ...eRow, _source_ei: "exit_interview" })
+  for (const key of s.order) {
+    seen.add(key)
+    const sList = s.map.get(key)!
+    const eList = e.map.get(key)
+    if (eList && eList.length) {
+      for (const S of sList) for (const E of eList) { merged.push(buildRow(key, S, E)); bothCount++ }
+    } else {
+      for (const S of sList) { merged.push(buildRow(key, S, undefined)); surveyOnlyCount++ }
     }
   }
+  // Survey rows with a blank Ecode: kept as unmatched (NaN never joins).
+  for (const S of s.blanks) { merged.push(buildRow("", S, undefined)); surveyOnlyCount++ }
+  // EI rows whose Ecode wasn't seen on the survey side.
+  for (const key of e.order) {
+    if (seen.has(key)) continue
+    for (const E of e.map.get(key)!) { merged.push(buildRow(key, undefined, E)); eiOnlyCount++ }
+  }
+  // EI rows with a blank Ecode: kept as unmatched.
+  for (const E of e.blanks) { merged.push(buildRow("", undefined, E)); eiOnlyCount++ }
 
-  return { merged, bothCount, surveyOnlyCount, eiOnlyCount }
+  return { merged, mergedCols, bothCount, surveyOnlyCount, eiOnlyCount }
 }
 
 // =============================================================================
@@ -735,6 +880,315 @@ function formatRowRef(loc: AuditRowRef): string {
 }
 
 // =============================================================================
+// COLUMN-ORDER HELPERS (reproduce pandas concat + assignment ordering)
+// =============================================================================
+
+/** The 9 columns created/overwritten by the mapping lookups, in assignment order. */
+const MAPPED_COLS = [
+  "Department",
+  "Sub-Function",
+  "Function",
+  "ExternalDataReference",
+  "Cluster",
+  "Region",
+  "Mapped Seniority",
+  "Mapped Employee Level",
+  "Mapped Position",
+]
+
+/**
+ * Beyond Bain columns kept in the final output, in order (prefixed with BB_).
+ * The reference output retains only this subset of the Beyond Bain extract.
+ */
+const BB_ALLOWLIST = [
+  "BB_Company (ZID4_9)",
+  "BB_Function (ZID4_117)",
+  "BB_Job Level (ZID4_88)",
+  "BB_Bain Departure Year (ZID7_163)",
+  "BB_Client Priority (ZID11_167)",
+  "BB_Company Industry (ZID4_202)",
+  "BB_Company Sector (ZID4_203)",
+  "BB_Mapped Role Function",
+]
+
+/**
+ * Normalize a cell value for output. SheetJS formats boolean cells (read with
+ * `raw: false`) as the strings "TRUE"/"FALSE"; the reference pandas output uses
+ * Python-style "True"/"False", so we map those two exact tokens to match. All
+ * other values (dates, numbers, text) pass through unchanged.
+ */
+function normalizeCell(v: string | number | null | undefined): string | number | null {
+  if (v === "TRUE") return "True"
+  if (v === "FALSE") return "False"
+  return v ?? null
+}
+
+const RESPONSE_ID_COL = "Response ID"
+
+function signatureValue(value: unknown): [string, unknown] {
+  if (value === null) return ["null", null]
+  if (value === undefined) return ["undefined", null]
+  if (typeof value === "number") return ["number", Number.isNaN(value) ? "NaN" : value]
+  if (typeof value === "boolean") return ["boolean", value]
+  return [typeof value, String(value)]
+}
+
+/** Stable complete-row signature in the fixed output-column order. */
+export function exactRowSignature(row: Row, columns: string[]): string {
+  return JSON.stringify(columns.map((column) => signatureValue(row[column])))
+}
+
+/** Remove exact full-row copies, retaining the first occurrence. */
+export function deduplicateExactRows(
+  rows: Row[],
+  columns: string[],
+): { rows: Row[]; removed: number } {
+  const seen = new Set<string>()
+  const retained: Row[] = []
+  let removed = 0
+  for (const row of rows) {
+    const signature = exactRowSignature(row, columns)
+    if (seen.has(signature)) {
+      removed++
+    } else {
+      seen.add(signature)
+      retained.push(row)
+    }
+  }
+  return { rows: retained, removed }
+}
+
+/** Hard gate proving no exact full-row duplicate survived. */
+export function validateNoExactDuplicates(rows: Row[], columns: string[]): void {
+  const seen = new Set<string>()
+  for (let index = 0; index < rows.length; index++) {
+    const signature = exactRowSignature(rows[index], columns)
+    if (seen.has(signature)) {
+      throw new Error(
+        `Exact-row deduplication failed: cleaned output row ${index + 1} duplicates an earlier row.`,
+      )
+    }
+    seen.add(signature)
+  }
+}
+
+export interface DuplicateReviewSummary {
+  column: string
+  groups: number
+  affectedRows: number
+  values: Set<string>
+  issues: AuditIssue[]
+}
+
+/** Group non-blank duplicate identifiers for manual review. */
+export function analyzeDuplicateValues(rows: Row[], column: string): DuplicateReviewSummary {
+  if (rows.length > 0 && !Object.prototype.hasOwnProperty.call(rows[0], column)) {
+    throw new Error(`Duplicate review failed: required column ${JSON.stringify(column)} is missing.`)
+  }
+  const occurrences = new Map<string, number[]>()
+  rows.forEach((row, index) => {
+    const value = String(row[column] ?? "").trim()
+    if (!value) return
+    const indexes = occurrences.get(value) ?? []
+    indexes.push(index)
+    occurrences.set(value, indexes)
+  })
+  const duplicateEntries = [...occurrences.entries()]
+    .filter(([, indexes]) => indexes.length > 1)
+    .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+  const values = new Set(duplicateEntries.map(([value]) => value))
+  const issues = duplicateEntries.map(([value, indexes]) => ({
+    value,
+    rowCount: indexes.length,
+    rows: indexes.map((index) => ({
+      ecode: String(rows[index][COLS.ECODE] ?? "").trim(),
+      source: "Cleaned output",
+      rowNumber: index + 1,
+    })),
+  }))
+  return {
+    column,
+    groups: duplicateEntries.length,
+    affectedRows: duplicateEntries.reduce((sum, [, indexes]) => sum + indexes.length, 0),
+    values,
+    issues,
+  }
+}
+
+/** Column headers for the Ecode anonymization mapping export. */
+const ANON_CODE_COL = "Anonymized Code"
+const ANON_ECODE_COL = "Original Ecode"
+
+/**
+ * Anonymize the Ecode column: assign each UNIQUE non-blank Ecode a unique random
+ * 5-digit code, rewrite the Ecode column of every row in place, and return the
+ * traceability mapping rows (Anonymized Code → Original Ecode).
+ *
+ * Notes:
+ *   • Rows sharing the same Ecode (e.g. a survey/EI match) get the same code, so
+ *     the join relationship is preserved.
+ *   • Blank Ecodes are left blank — there is nothing to anonymize.
+ *   • 5-digit codes span 10000–99999 (90,000 values); we guard against overflow.
+ */
+function anonymizeEcodes(rows: Row[]): Row[] {
+  // Unique non-blank Ecodes, in first-seen order.
+  const uniqueEcodes: string[] = []
+  const seen = new Set<string>()
+  for (const r of rows) {
+    const e = String(r[COLS.ECODE] ?? "").trim()
+    if (e && !seen.has(e)) {
+      seen.add(e)
+      uniqueEcodes.push(e)
+    }
+  }
+
+  if (uniqueEcodes.length > 90000) {
+    throw new Error(
+      `Cannot anonymize with 5-digit codes: ${uniqueEcodes.length} unique Ecodes exceed the 90,000 available codes.`,
+    )
+  }
+
+  // Assign a unique random 5-digit code to each unique Ecode.
+  const usedCodes = new Set<string>()
+  const codeFor = new Map<string, string>()
+  const genCode = (): string => {
+    for (;;) {
+      const c = String(Math.floor(10000 + Math.random() * 90000)) // 10000–99999, always 5 digits
+      if (!usedCodes.has(c)) {
+        usedCodes.add(c)
+        return c
+      }
+    }
+  }
+  for (const e of uniqueEcodes) codeFor.set(e, genCode())
+
+  // Rewrite the Ecode column in place.
+  for (const r of rows) {
+    const e = String(r[COLS.ECODE] ?? "").trim()
+    if (e) r[COLS.ECODE] = codeFor.get(e)!
+  }
+
+  // Traceability mapping rows.
+  return uniqueEcodes.map((e) => ({
+    [ANON_CODE_COL]: codeFor.get(e)!,
+    [ANON_ECODE_COL]: e,
+  }))
+}
+
+export interface EcodeIntegritySummary {
+  nonBlankRows: number
+  uniqueOriginalEcodes: number
+  repeatedRows: number
+  uniqueAnonymizedCodes: number
+  mappingRows: number
+}
+
+/**
+ * Hard reconciliation for every file that carries anonymized Ecodes.
+ * Throws before output files are emitted if any invariant is broken.
+ */
+export function validateEcodeIntegrity(
+  fullRows: Row[],
+  redactedRows: Row[],
+  ecodeMap: Row[],
+): EcodeIntegritySummary {
+  if (fullRows.length !== redactedRows.length) {
+    throw new Error(
+      `Ecode integrity failed: full output has ${fullRows.length} rows but no-PII output has ${redactedRows.length}.`,
+    )
+  }
+
+  const fullCodes: string[] = []
+  const redactedCodes: string[] = []
+  for (let i = 0; i < fullRows.length; i++) {
+    const full = String(fullRows[i][COLS.ECODE] ?? "").trim()
+    const redacted = String(redactedRows[i][COLS.ECODE] ?? "").trim()
+    if (full !== redacted) {
+      throw new Error(
+        `Ecode integrity failed: full and no-PII outputs disagree at output row ${i + 1}.`,
+      )
+    }
+    if (full) {
+      if (!/^\d{5}$/.test(full) || Number(full) < 10000 || Number(full) > 99999) {
+        throw new Error(
+          `Ecode integrity failed: output row ${i + 1} has invalid anonymized Ecode ${JSON.stringify(full)}; expected 10000–99999.`,
+        )
+      }
+      fullCodes.push(full)
+      redactedCodes.push(redacted)
+    }
+  }
+
+  const mappingCodes: string[] = []
+  const mappingOriginals: string[] = []
+  for (let i = 0; i < ecodeMap.length; i++) {
+    const code = String(ecodeMap[i][ANON_CODE_COL] ?? "").trim()
+    const original = String(ecodeMap[i][ANON_ECODE_COL] ?? "").trim()
+    if (!/^\d{5}$/.test(code) || Number(code) < 10000 || Number(code) > 99999) {
+      throw new Error(
+        `Ecode integrity failed: mapping row ${i + 1} has invalid anonymized code ${JSON.stringify(code)}.`,
+      )
+    }
+    if (!original) {
+      throw new Error(`Ecode integrity failed: mapping row ${i + 1} has a blank original Ecode.`)
+    }
+    mappingCodes.push(code)
+    mappingOriginals.push(original)
+  }
+
+  const uniqueFull = new Set(fullCodes)
+  const uniqueRedacted = new Set(redactedCodes)
+  const uniqueMappingCodes = new Set(mappingCodes)
+  const uniqueMappingOriginals = new Set(mappingOriginals)
+
+  if (uniqueMappingCodes.size !== mappingCodes.length) {
+    throw new Error("Ecode integrity failed: the mapping file contains a duplicate anonymized code.")
+  }
+  if (uniqueMappingOriginals.size !== mappingOriginals.length) {
+    throw new Error("Ecode integrity failed: the mapping file contains a duplicate original Ecode.")
+  }
+  const sameSet = (a: Set<string>, b: Set<string>) =>
+    a.size === b.size && [...a].every((value) => b.has(value))
+  if (!sameSet(uniqueFull, uniqueRedacted)) {
+    throw new Error("Ecode integrity failed: full and no-PII outputs contain different anonymized-code sets.")
+  }
+  if (!sameSet(uniqueFull, uniqueMappingCodes)) {
+    throw new Error(
+      `Ecode integrity failed: cleaned outputs contain ${uniqueFull.size} unique codes but the mapping file contains ${uniqueMappingCodes.size}.`,
+    )
+  }
+  if (uniqueMappingOriginals.size !== uniqueFull.size) {
+    throw new Error(
+      `Ecode integrity failed: mapping has ${uniqueMappingOriginals.size} unique original Ecodes but cleaned outputs contain ${uniqueFull.size} unique anonymized codes.`,
+    )
+  }
+
+  return {
+    nonBlankRows: fullCodes.length,
+    uniqueOriginalEcodes: uniqueMappingOriginals.size,
+    repeatedRows: fullCodes.length - uniqueFull.size,
+    uniqueAnonymizedCodes: uniqueFull.size,
+    mappingRows: ecodeMap.length,
+  }
+}
+
+/** Union of two ordered column lists: first list, then second-list items not already present. */
+function orderedUnion(a: string[], b: string[]): string[] {
+  const seen = new Set(a)
+  const out = [...a]
+  for (const c of b) if (!seen.has(c)) { seen.add(c); out.push(c) }
+  return out
+}
+
+/** Append any of the 9 mapped columns that are not already present (pandas appends on assignment). */
+function ensureMappedCols(cols: string[]): string[] {
+  const seen = new Set(cols)
+  const out = [...cols]
+  for (const m of MAPPED_COLS) if (!seen.has(m)) { seen.add(m); out.push(m) }
+  return out
+}
+
+// =============================================================================
 // MAIN PIPELINE
 // =============================================================================
 
@@ -757,35 +1211,31 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   const oldSurvey = loadSurvey(files.oldSurvey, "departure_survey", "Survey 1", warnings)
   const newSurvey = loadSurvey(files.newSurvey, "departure_survey", "Survey 2", warnings)
 
-  const oldSurveyRows = oldSurvey.length
-  const newSurveyRows = newSurvey.length
+  const oldSurveyRows = oldSurvey.rows.length
+  const newSurveyRows = newSurvey.rows.length
 
-  // Stack (union of columns, null where absent)
-  const allSurveyCols = new Set([
-    ...Object.keys(oldSurvey[0] ?? {}),
-    ...Object.keys(newSurvey[0] ?? {}),
-  ])
-  const normalizeRow = (r: Row, cols: Set<string>): Row => {
-    const out: Row = {}
-    for (const c of cols) out[c] = r[c] ?? null
-    return out
-  }
-  const combinedSurvey = [
-    ...oldSurvey.map((r) => normalizeRow(r, allSurveyCols)),
-    ...newSurvey.map((r) => normalizeRow(r, allSurveyCols)),
-  ]
+  // Stack survey rows (pandas concat: union of columns in first-seen order).
+  const combinedSurvey = [...oldSurvey.rows, ...newSurvey.rows]
+  // Column order = old columns, then any new-survey columns not already present.
+  const surveyColsBase = orderedUnion(oldSurvey.columns, newSurvey.columns)
 
   // ── STEP 3: Load exit interview ─────────────────────────────────────────
-  const combinedEI = loadExitInterview(files.exitInterview, warnings)
+  const ei = loadExitInterview(files.exitInterview, warnings)
+  const combinedEI = ei.rows
 
-  // ── STEP 4: Apply mappings ──────────────────────────────────────────────
+  // ── STEP 4: Apply mappings ───────────────────────────────────────────���──
+  // Mappings overwrite/create the 9 mapped columns; append any that are new.
   const mappedSurvey = applyAllMappings(combinedSurvey, deptMap, geoMap, pdMap, mappingAudits)
   const mappedEI = applyAllMappings(combinedEI, deptMap, geoMap, pdMap, mappingAudits)
+  const surveyCols = ensureMappedCols(surveyColsBase)
+  const eiCols = ensureMappedCols(ei.columns)
 
   // ── STEP 5: Outer join survey + EI ─────────────────────────────────────
-  const { merged: population, bothCount, surveyOnlyCount, eiOnlyCount } = outerJoin(
+  const { merged: population, mergedCols, bothCount, surveyOnlyCount, eiOnlyCount } = outerJoin(
     mappedSurvey,
+    surveyCols,
     mappedEI,
+    eiCols,
   )
 
   // ── STEP 6: Enrich with Beyond Bain (left join) ─────────────────────────
@@ -796,42 +1246,49 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
   }))
   bbRows = applyBeyondBainLogic(bbRows)
 
-  // Index BB by Ecode
+  // Index BB by Ecode (BB_-prefixed values restricted to the allowlist for output).
   const bbByEcode = new Map<string, Row>()
   for (const r of bbRows) {
     const key = String(r[COLS.BB_ECODE] ?? "")
-    if (key) bbByEcode.set(key, r)
+    if (key && !bbByEcode.has(key)) bbByEcode.set(key, r)
   }
 
   let beyondBainMatched = 0
   const bbAudit = newLookupAudit()
-  const enriched = population.map((r) => {
+
+  // ── STEP 7: Assemble final rows against a single fixed column schema ─────
+  const finalColumns = [...mergedCols, ...BB_ALLOWLIST]
+  const assembledRows = population.map((r) => {
     const ecode = String(r[COLS.ECODE] ?? "")
     const bbRow = bbByEcode.get(ecode)
     recordLookup(bbAudit, ecode, !!bbRow, { ecode, source: "Merged population", rowNumber: null })
-    if (!bbRow) return r
-    beyondBainMatched++
-    // Prefix all BB columns with BB_ to avoid collisions
-    const bbPrefixed: Row = {}
-    for (const [k, v] of Object.entries(bbRow)) {
-      if (k === COLS.BB_ECODE) continue
-      bbPrefixed[`BB_${k}`] = v
+    if (bbRow) beyondBainMatched++
+    const out: Row = {}
+    for (const c of mergedCols) out[c] = normalizeCell(r[c])
+    for (const c of BB_ALLOWLIST) {
+      // BB_ prefix → original Beyond Bain column name.
+      const src = c.slice(3)
+      out[c] = bbRow ? normalizeCell(bbRow[src]) : null
     }
-    return { ...r, ...bbPrefixed }
+    return out
   })
 
-  // ── STEP 7: Drop internal pipeline columns ──────────────────────────────
-  const finalRows = enriched.map((r) => {
-    const { _source, _rowRef, _srcFile, _srcRow, ...rest } = r as Row & {
-      _source?: unknown
-      _rowRef?: unknown
-      _srcFile?: unknown
-      _srcRow?: unknown
-    }
-    return rest
-  })
+  // ── STEP 7b: Remove exact full-row duplicates, retaining the first ─────────
+  const deduplicated = deduplicateExactRows(assembledRows, finalColumns)
+  const finalRows = deduplicated.rows
+  validateNoExactDuplicates(finalRows, finalColumns)
 
-  const totalColumns = finalRows.length > 0 ? Object.keys(finalRows[0]).length : 0
+  // ── STEP 7c: Anonymize the Ecode column + build the traceability mapping ───
+  const ecodeMap = anonymizeEcodes(finalRows)
+  // Derive the no-PII row set now and reconcile its fixed schema, cleared PII
+  // fields, anonymized Ecodes, and mapping before any result can be returned.
+  const redactedRowsForChecks = stripPIIColumns(finalRows)
+  validatePIIRedaction(finalRows, redactedRowsForChecks)
+  const ecodeIntegrity = validateEcodeIntegrity(finalRows, redactedRowsForChecks, ecodeMap)
+  const duplicateResponseIds = analyzeDuplicateValues(finalRows, RESPONSE_ID_COL)
+  const duplicateEcodes = analyzeDuplicateValues(finalRows, COLS.ECODE)
+
+  const totalColumns = finalColumns.length
 
   // ── STEP 8: Assemble the audit report ───────────────────────────────────
   const checks: AuditCheck[] = []
@@ -852,7 +1309,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     status: surveyBlankLocs.length > 0 ? "warning" : "ok",
     detail:
       surveyBlankLocs.length > 0
-        ? `${fmtInt(surveyBlankLocs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode and were excluded from the merge.`
+        ? `${fmtInt(surveyBlankLocs.length)} of ${fmtInt(combinedSurvey.length)} survey rows have a blank Ecode; they are kept as unmatched rows (a blank key never joins to the exit interviews).`
         : `All ${fmtInt(combinedSurvey.length)} survey rows have a valid Ecode.`,
     samples: surveyBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
     issueLabel: surveyBlankLocs.length > 0 ? "Issue" : undefined,
@@ -863,11 +1320,58 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     status: eiBlankLocs.length > 0 ? "warning" : "ok",
     detail:
       eiBlankLocs.length > 0
-        ? `${fmtInt(eiBlankLocs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode and were excluded from the merge.`
+        ? `${fmtInt(eiBlankLocs.length)} of ${fmtInt(combinedEI.length)} exit-interview rows have a blank Cleaned Ecode; they are kept as unmatched rows (a blank key never joins to the surveys).`
         : `All ${fmtInt(combinedEI.length)} exit-interview rows have a valid Ecode.`,
     samples: eiBlankLocs.slice(0, MAX_SAMPLES).map(formatRowRef),
     issueLabel: eiBlankLocs.length > 0 ? "Issue" : undefined,
     issues: eiBlankLocs.length > 0 ? blankIssues(eiBlankLocs) : undefined,
+  })
+
+  checks.push({
+    label: "Ecode anonymization integrity",
+    status: "ok",
+    detail:
+      `${fmtInt(ecodeIntegrity.nonBlankRows)} non-blank output rows were checked. ` +
+      `${fmtInt(ecodeIntegrity.uniqueOriginalEcodes)} unique original Ecodes map one-to-one to ` +
+      `${fmtInt(ecodeIntegrity.uniqueAnonymizedCodes)} unique five-digit codes; ` +
+      `${fmtInt(ecodeIntegrity.repeatedRows)} repeated row occurrence(s) reuse an existing code. ` +
+      `The full XLSX, no-PII XLSX/CSV, and ${fmtInt(ecodeIntegrity.mappingRows)}-row mapping file agree exactly.`,
+  })
+  checks.push({
+    label: "PII redaction structure",
+    status: "ok",
+    detail:
+      `${fmtInt(finalColumns.length - PII_COLUMNS.length)} no-PII columns verified in fixed order: ` +
+      `${PII_COLUMNS.length} approved columns removed and ${PII_COLUMNS_TO_CLEAR.length} retained PII headers cleared on every row.`,
+  })
+  checks.push({
+    label: "Exact-row deduplication",
+    status: "ok",
+    detail:
+      `${fmtInt(deduplicated.removed)} exact duplicate row(s) removed; the first occurrence was retained. ` +
+      `All ${fmtInt(finalRows.length)} cleaned rows were validated and no exact duplicate remains.`,
+  })
+  checks.push({
+    label: "Duplicate Response ID review",
+    status: duplicateResponseIds.groups > 0 ? "warning" : "ok",
+    detail:
+      duplicateResponseIds.groups > 0
+        ? `${fmtInt(duplicateResponseIds.groups)} duplicate Response ID group(s) affect ${fmtInt(duplicateResponseIds.affectedRows)} non-identical cleaned rows. Every occurrence is highlighted amber in both XLSX outputs for manual review.`
+        : `No repeated non-blank Response ID remains after exact-row deduplication.`,
+    samples: duplicateResponseIds.issues.slice(0, MAX_SAMPLES).map(({ value }) => value),
+    issueLabel: duplicateResponseIds.groups > 0 ? "Response ID" : undefined,
+    issues: duplicateResponseIds.groups > 0 ? duplicateResponseIds.issues : undefined,
+  })
+  checks.push({
+    label: "Duplicate Ecode review",
+    status: duplicateEcodes.groups > 0 ? "warning" : "ok",
+    detail:
+      duplicateEcodes.groups > 0
+        ? `${fmtInt(duplicateEcodes.groups)} duplicate anonymized Ecode group(s) affect ${fmtInt(duplicateEcodes.affectedRows)} non-identical cleaned rows. Every occurrence is highlighted amber in both XLSX outputs for manual review.`
+        : `No repeated non-blank Ecode remains after exact-row deduplication.`,
+    samples: duplicateEcodes.issues.slice(0, MAX_SAMPLES).map(({ value }) => value),
+    issueLabel: duplicateEcodes.groups > 0 ? "Anonymized Ecode" : undefined,
+    issues: duplicateEcodes.groups > 0 ? duplicateEcodes.issues : undefined,
   })
 
   // Mapping lookup checks
@@ -903,6 +1407,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   return {
     rows: finalRows,
+    ecodeMap,
     stats: {
       oldSurveyRows,
       newSurveyRows,
@@ -913,6 +1418,11 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
       surveyOnlyCount,
       eiOnlyCount,
       beyondBainMatched,
+      exactDuplicateRowsRemoved: deduplicated.removed,
+      duplicateResponseIdGroups: duplicateResponseIds.groups,
+      duplicateResponseIdRows: duplicateResponseIds.affectedRows,
+      duplicateEcodeGroups: duplicateEcodes.groups,
+      duplicateEcodeRows: duplicateEcodes.affectedRows,
       totalColumns,
     },
     warnings,
@@ -971,6 +1481,14 @@ export async function rowsToXLSX(rows: Row[]): Promise<Buffer> {
   ws.views = [{ state: "frozen", ySplit: 1 }] // keep header visible while scrolling
 
   const highlightCols = HIGHLIGHT_COLS.filter((c) => seen.has(c))
+  // Exact copies have already been removed. Any repeated identifier now points
+  // to non-identical records that require manual review.
+  const duplicateResponseIds = seen.has(RESPONSE_ID_COL)
+    ? analyzeDuplicateValues(rows, RESPONSE_ID_COL).values
+    : new Set<string>()
+  const duplicateEcodes = seen.has(COLS.ECODE)
+    ? analyzeDuplicateValues(rows, COLS.ECODE).values
+    : new Set<string>()
 
   for (const r of rows) {
     const values: Record<string, string | number> = {}
@@ -989,6 +1507,23 @@ export async function rowsToXLSX(rows: Row[]): Promise<Buffer> {
         }
       }
     }
+    // Highlight every occurrence of a repeated Response ID / Ecode amber.
+    const responseId = String(r[RESPONSE_ID_COL] ?? "").trim()
+    if (responseId && duplicateResponseIds.has(responseId)) {
+      added.getCell(RESPONSE_ID_COL).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF4B183" }, // amber: duplicate review
+      }
+    }
+    const ecode = String(r[COLS.ECODE] ?? "").trim()
+    if (ecode && duplicateEcodes.has(ecode)) {
+      added.getCell(COLS.ECODE).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF4B183" }, // amber: duplicate review
+      }
+    }
   }
 
   const buf = await wb.xlsx.writeBuffer()
@@ -998,4 +1533,105 @@ export async function rowsToXLSX(rows: Row[]): Promise<Buffer> {
 export function rowsToCSV(rows: Row[]): string {
   const ws = XLSX.utils.json_to_sheet(rows)
   return XLSX.utils.sheet_to_csv(ws)
+}
+
+/**
+ * Columns containing blatant PII (names + email addresses) to remove from the
+ * PII-redacted export. Matched by exact column name in the final output.
+ */
+export const PII_COLUMNS = [
+  "Recipient Last Name",
+  "Recipient First Name",
+  "Recipient Email",
+  "*Email address (personal):",
+  "Business / school email address:",
+  "RecipientEmail",
+  "Legal name",
+  "[For interviewer] Please provide information on the departing employee - Employee name:",
+]
+
+/**
+ * Additional PII fields whose headers and positions are part of the fixed
+ * no-PII schema. Their values are cleared rather than their columns removed.
+ */
+export const PII_COLUMNS_TO_CLEAR = [
+  "LinkedIn URL:",
+  "Contact Information - Street Address:",
+  "Contact Information - City:",
+  "Contact Information - State",
+  "Contact Information - Zip Code:",
+  "Contact Information - Country:",
+  "Email - Home",
+]
+
+/**
+ * Return a copy of the rows for the no-PII exports. The original eight PII
+ * columns are removed; the seven fixed-schema PII columns remain in their
+ * original order with blank contents.
+ */
+export function stripPIIColumns(rows: Row[]): Row[] {
+  const drop = new Set(PII_COLUMNS)
+  const clear = new Set(PII_COLUMNS_TO_CLEAR)
+  return rows.map((r) => {
+    const out: Row = {}
+    for (const [k, v] of Object.entries(r)) {
+      if (!drop.has(k)) out[k] = clear.has(k) ? "" : v
+    }
+    return out
+  })
+}
+
+/**
+ * Protect the fixed no-PII file structure and prove that retained PII fields
+ * are empty. Throws before export if a required header is absent, reordered,
+ * populated, or if any column other than the approved eight was removed.
+ */
+export function validatePIIRedaction(fullRows: Row[], redactedRows: Row[]): void {
+  if (fullRows.length === 0 || redactedRows.length === 0) {
+    throw new Error("PII redaction integrity failed: output rows are empty, so the fixed schema cannot be verified.")
+  }
+  if (fullRows.length !== redactedRows.length) {
+    throw new Error(
+      `PII redaction integrity failed: full output has ${fullRows.length} rows but no-PII output has ${redactedRows.length}.`,
+    )
+  }
+
+  const fullColumns = Object.keys(fullRows[0])
+  const redactedColumns = Object.keys(redactedRows[0])
+  const missingDropHeaders = PII_COLUMNS.filter((column) => !fullColumns.includes(column))
+  const missingClearHeaders = PII_COLUMNS_TO_CLEAR.filter((column) => !fullColumns.includes(column))
+  if (missingDropHeaders.length > 0 || missingClearHeaders.length > 0) {
+    throw new Error(
+      `PII redaction integrity failed: required header(s) are missing from the full output: ${[
+        ...missingDropHeaders,
+        ...missingClearHeaders,
+      ].join(", ")}.`,
+    )
+  }
+
+  const drop = new Set(PII_COLUMNS)
+  const expectedColumns = fullColumns.filter((column) => !drop.has(column))
+  if (
+    expectedColumns.length !== redactedColumns.length ||
+    expectedColumns.some((column, index) => redactedColumns[index] !== column)
+  ) {
+    throw new Error(
+      `PII redaction integrity failed: expected ${expectedColumns.length} no-PII columns in the fixed order but received ${redactedColumns.length}.`,
+    )
+  }
+
+  for (const column of PII_COLUMNS_TO_CLEAR) {
+    if (!redactedColumns.includes(column)) {
+      throw new Error(`PII redaction integrity failed: retained header ${JSON.stringify(column)} was removed.`)
+    }
+  }
+  for (let rowIndex = 0; rowIndex < redactedRows.length; rowIndex++) {
+    for (const column of PII_COLUMNS_TO_CLEAR) {
+      if (redactedRows[rowIndex][column] !== "") {
+        throw new Error(
+          `PII redaction integrity failed: ${JSON.stringify(column)} is not blank at no-PII row ${rowIndex + 1}.`,
+        )
+      }
+    }
+  }
 }
