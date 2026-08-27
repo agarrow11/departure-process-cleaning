@@ -115,7 +115,7 @@ export default function ProcessGuidePage() {
           <dl className="guide-meta">
             <div><dt>Scope</dt><dd>Current production behavior</dd></div>
             <div><dt>Audience</dt><dd>Operators, reviewers & technical maintainers</dd></div>
-            <div><dt>Reviewed</dt><dd>25 August 2026 · commit d199b9a</dd></div>
+            <div><dt>Reviewed</dt><dd>27 August 2026 · duplicate controls verified</dd></div>
           </dl>
         </div>
       </div>
