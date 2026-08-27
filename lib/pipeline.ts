@@ -1178,9 +1178,11 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   // ── STEP 7b: Anonymize the Ecode column + build the traceability mapping ─
   const ecodeMap = anonymizeEcodes(finalRows)
-  // Derive the no-PII row set now and reconcile it against the full rows and
-  // mapping. This is a hard gate: no result is returned if the sets disagree.
-  const ecodeIntegrity = validateEcodeIntegrity(finalRows, stripPIIColumns(finalRows), ecodeMap)
+  // Derive the no-PII row set now and reconcile its fixed schema, cleared PII
+  // fields, anonymized Ecodes, and mapping before any result can be returned.
+  const redactedRowsForChecks = stripPIIColumns(finalRows)
+  validatePIIRedaction(finalRows, redactedRowsForChecks)
+  const ecodeIntegrity = validateEcodeIntegrity(finalRows, redactedRowsForChecks, ecodeMap)
 
   const totalColumns = finalColumns.length
 
@@ -1230,6 +1232,13 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
       `${fmtInt(ecodeIntegrity.uniqueAnonymizedCodes)} unique five-digit codes; ` +
       `${fmtInt(ecodeIntegrity.repeatedRows)} repeated row occurrence(s) reuse an existing code. ` +
       `The full XLSX, no-PII XLSX/CSV, and ${fmtInt(ecodeIntegrity.mappingRows)}-row mapping file agree exactly.`,
+  })
+  checks.push({
+    label: "PII redaction structure",
+    status: "ok",
+    detail:
+      `${fmtInt(finalColumns.length - PII_COLUMNS.length)} no-PII columns verified in fixed order: ` +
+      `${PII_COLUMNS.length} approved columns removed and ${PII_COLUMNS_TO_CLEAR.length} retained PII headers cleared on every row.`,
   })
 
   // Mapping lookup checks
@@ -1379,17 +1388,87 @@ export const PII_COLUMNS = [
 ]
 
 /**
- * Return a copy of the rows with the PII columns removed. Every row shares the
- * same fixed schema, so dropping these keys removes the columns from both the
- * CSV and XLSX exports (their column order is derived from the row keys).
+ * Additional PII fields whose headers and positions are part of the fixed
+ * no-PII schema. Their values are cleared rather than their columns removed.
+ */
+export const PII_COLUMNS_TO_CLEAR = [
+  "LinkedIn URL:",
+  "Contact Information - Street Address:",
+  "Contact Information - City:",
+  "Contact Information - State",
+  "Contact Information - Zip Code:",
+  "Contact Information - Country:",
+  "Email - Home",
+]
+
+/**
+ * Return a copy of the rows for the no-PII exports. The original eight PII
+ * columns are removed; the seven fixed-schema PII columns remain in their
+ * original order with blank contents.
  */
 export function stripPIIColumns(rows: Row[]): Row[] {
   const drop = new Set(PII_COLUMNS)
+  const clear = new Set(PII_COLUMNS_TO_CLEAR)
   return rows.map((r) => {
     const out: Row = {}
     for (const [k, v] of Object.entries(r)) {
-      if (!drop.has(k)) out[k] = v
+      if (!drop.has(k)) out[k] = clear.has(k) ? "" : v
     }
     return out
   })
+}
+
+/**
+ * Protect the fixed no-PII file structure and prove that retained PII fields
+ * are empty. Throws before export if a required header is absent, reordered,
+ * populated, or if any column other than the approved eight was removed.
+ */
+export function validatePIIRedaction(fullRows: Row[], redactedRows: Row[]): void {
+  if (fullRows.length === 0 || redactedRows.length === 0) {
+    throw new Error("PII redaction integrity failed: output rows are empty, so the fixed schema cannot be verified.")
+  }
+  if (fullRows.length !== redactedRows.length) {
+    throw new Error(
+      `PII redaction integrity failed: full output has ${fullRows.length} rows but no-PII output has ${redactedRows.length}.`,
+    )
+  }
+
+  const fullColumns = Object.keys(fullRows[0])
+  const redactedColumns = Object.keys(redactedRows[0])
+  const missingDropHeaders = PII_COLUMNS.filter((column) => !fullColumns.includes(column))
+  const missingClearHeaders = PII_COLUMNS_TO_CLEAR.filter((column) => !fullColumns.includes(column))
+  if (missingDropHeaders.length > 0 || missingClearHeaders.length > 0) {
+    throw new Error(
+      `PII redaction integrity failed: required header(s) are missing from the full output: ${[
+        ...missingDropHeaders,
+        ...missingClearHeaders,
+      ].join(", ")}.`,
+    )
+  }
+
+  const drop = new Set(PII_COLUMNS)
+  const expectedColumns = fullColumns.filter((column) => !drop.has(column))
+  if (
+    expectedColumns.length !== redactedColumns.length ||
+    expectedColumns.some((column, index) => redactedColumns[index] !== column)
+  ) {
+    throw new Error(
+      `PII redaction integrity failed: expected ${expectedColumns.length} no-PII columns in the fixed order but received ${redactedColumns.length}.`,
+    )
+  }
+
+  for (const column of PII_COLUMNS_TO_CLEAR) {
+    if (!redactedColumns.includes(column)) {
+      throw new Error(`PII redaction integrity failed: retained header ${JSON.stringify(column)} was removed.`)
+    }
+  }
+  for (let rowIndex = 0; rowIndex < redactedRows.length; rowIndex++) {
+    for (const column of PII_COLUMNS_TO_CLEAR) {
+      if (redactedRows[rowIndex][column] !== "") {
+        throw new Error(
+          `PII redaction integrity failed: ${JSON.stringify(column)} is not blank at no-PII row ${rowIndex + 1}.`,
+        )
+      }
+    }
+  }
 }

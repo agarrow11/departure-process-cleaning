@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { runPipeline, rowsToXLSX, rowsToCSV, stripPIIColumns, validateEcodeIntegrity } from "@/lib/pipeline"
+import { runPipeline, rowsToXLSX, rowsToCSV, stripPIIColumns, validateEcodeIntegrity, validatePIIRedaction } from "@/lib/pipeline"
 
 export const runtime = "nodejs" // Required: pipeline uses Node Buffer APIs
 export const maxDuration = 300   // 5 min — large files may take time
@@ -45,10 +45,11 @@ export async function POST(request: NextRequest) {
     const xlsxBuffer = await rowsToXLSX(result.rows)
     // Ecode anonymization mapping (traceability): original Ecode ↔ 5-digit code.
     const mappingCsv = rowsToCSV(result.ecodeMap)
-    // PII-redacted variants: same data with 8 blatant-PII columns removed.
+    // PII-redacted variants: remove 8 approved columns and retain 7 fixed-schema
+    // headers with blank values. Re-run both hard reconciliations at the file-
+    // production boundary so future route changes cannot emit invalid files.
     const redactedRows = stripPIIColumns(result.rows)
-    // Re-run the hard reconciliation at the file-production boundary. Future
-    // route changes cannot emit files whose anonymized Ecode sets disagree.
+    validatePIIRedaction(result.rows, redactedRows)
     validateEcodeIntegrity(result.rows, redactedRows, result.ecodeMap)
     const xlsxRedactedBuffer = await rowsToXLSX(redactedRows)
     const csvRedactedString  = rowsToCSV(redactedRows)
