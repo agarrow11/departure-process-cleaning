@@ -52,6 +52,11 @@ export interface PipelineResult {
     surveyOnlyCount: number
     eiOnlyCount: number
     beyondBainMatched: number
+    exactDuplicateRowsRemoved: number
+    duplicateResponseIdGroups: number
+    duplicateResponseIdRows: number
+    duplicateEcodeGroups: number
+    duplicateEcodeRows: number
     totalColumns: number
   }
   warnings: string[]
@@ -918,6 +923,98 @@ function normalizeCell(v: string | number | null | undefined): string | number |
   return v ?? null
 }
 
+const RESPONSE_ID_COL = "Response ID"
+
+function signatureValue(value: unknown): [string, unknown] {
+  if (value === null) return ["null", null]
+  if (value === undefined) return ["undefined", null]
+  if (typeof value === "number") return ["number", Number.isNaN(value) ? "NaN" : value]
+  if (typeof value === "boolean") return ["boolean", value]
+  return [typeof value, String(value)]
+}
+
+/** Stable complete-row signature in the fixed output-column order. */
+export function exactRowSignature(row: Row, columns: string[]): string {
+  return JSON.stringify(columns.map((column) => signatureValue(row[column])))
+}
+
+/** Remove exact full-row copies, retaining the first occurrence. */
+export function deduplicateExactRows(
+  rows: Row[],
+  columns: string[],
+): { rows: Row[]; removed: number } {
+  const seen = new Set<string>()
+  const retained: Row[] = []
+  let removed = 0
+  for (const row of rows) {
+    const signature = exactRowSignature(row, columns)
+    if (seen.has(signature)) {
+      removed++
+    } else {
+      seen.add(signature)
+      retained.push(row)
+    }
+  }
+  return { rows: retained, removed }
+}
+
+/** Hard gate proving no exact full-row duplicate survived. */
+export function validateNoExactDuplicates(rows: Row[], columns: string[]): void {
+  const seen = new Set<string>()
+  for (let index = 0; index < rows.length; index++) {
+    const signature = exactRowSignature(rows[index], columns)
+    if (seen.has(signature)) {
+      throw new Error(
+        `Exact-row deduplication failed: cleaned output row ${index + 1} duplicates an earlier row.`,
+      )
+    }
+    seen.add(signature)
+  }
+}
+
+export interface DuplicateReviewSummary {
+  column: string
+  groups: number
+  affectedRows: number
+  values: Set<string>
+  issues: AuditIssue[]
+}
+
+/** Group non-blank duplicate identifiers for manual review. */
+export function analyzeDuplicateValues(rows: Row[], column: string): DuplicateReviewSummary {
+  if (rows.length > 0 && !Object.prototype.hasOwnProperty.call(rows[0], column)) {
+    throw new Error(`Duplicate review failed: required column ${JSON.stringify(column)} is missing.`)
+  }
+  const occurrences = new Map<string, number[]>()
+  rows.forEach((row, index) => {
+    const value = String(row[column] ?? "").trim()
+    if (!value) return
+    const indexes = occurrences.get(value) ?? []
+    indexes.push(index)
+    occurrences.set(value, indexes)
+  })
+  const duplicateEntries = [...occurrences.entries()]
+    .filter(([, indexes]) => indexes.length > 1)
+    .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+  const values = new Set(duplicateEntries.map(([value]) => value))
+  const issues = duplicateEntries.map(([value, indexes]) => ({
+    value,
+    rowCount: indexes.length,
+    rows: indexes.map((index) => ({
+      ecode: String(rows[index][COLS.ECODE] ?? "").trim(),
+      source: "Cleaned output",
+      rowNumber: index + 1,
+    })),
+  }))
+  return {
+    column,
+    groups: duplicateEntries.length,
+    affectedRows: duplicateEntries.reduce((sum, [, indexes]) => sum + indexes.length, 0),
+    values,
+    issues,
+  }
+}
+
 /** Column headers for the Ecode anonymization mapping export. */
 const ANON_CODE_COL = "Anonymized Code"
 const ANON_ECODE_COL = "Original Ecode"
@@ -1161,7 +1258,7 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
 
   // ── STEP 7: Assemble final rows against a single fixed column schema ─────
   const finalColumns = [...mergedCols, ...BB_ALLOWLIST]
-  const finalRows = population.map((r) => {
+  const assembledRows = population.map((r) => {
     const ecode = String(r[COLS.ECODE] ?? "")
     const bbRow = bbByEcode.get(ecode)
     recordLookup(bbAudit, ecode, !!bbRow, { ecode, source: "Merged population", rowNumber: null })
@@ -1176,13 +1273,20 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
     return out
   })
 
-  // ── STEP 7b: Anonymize the Ecode column + build the traceability mapping ─
+  // ── STEP 7b: Remove exact full-row duplicates, retaining the first ─────────
+  const deduplicated = deduplicateExactRows(assembledRows, finalColumns)
+  const finalRows = deduplicated.rows
+  validateNoExactDuplicates(finalRows, finalColumns)
+
+  // ── STEP 7c: Anonymize the Ecode column + build the traceability mapping ───
   const ecodeMap = anonymizeEcodes(finalRows)
   // Derive the no-PII row set now and reconcile its fixed schema, cleared PII
   // fields, anonymized Ecodes, and mapping before any result can be returned.
   const redactedRowsForChecks = stripPIIColumns(finalRows)
   validatePIIRedaction(finalRows, redactedRowsForChecks)
   const ecodeIntegrity = validateEcodeIntegrity(finalRows, redactedRowsForChecks, ecodeMap)
+  const duplicateResponseIds = analyzeDuplicateValues(finalRows, RESPONSE_ID_COL)
+  const duplicateEcodes = analyzeDuplicateValues(finalRows, COLS.ECODE)
 
   const totalColumns = finalColumns.length
 
@@ -1240,6 +1344,35 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
       `${fmtInt(finalColumns.length - PII_COLUMNS.length)} no-PII columns verified in fixed order: ` +
       `${PII_COLUMNS.length} approved columns removed and ${PII_COLUMNS_TO_CLEAR.length} retained PII headers cleared on every row.`,
   })
+  checks.push({
+    label: "Exact-row deduplication",
+    status: "ok",
+    detail:
+      `${fmtInt(deduplicated.removed)} exact duplicate row(s) removed; the first occurrence was retained. ` +
+      `All ${fmtInt(finalRows.length)} cleaned rows were validated and no exact duplicate remains.`,
+  })
+  checks.push({
+    label: "Duplicate Response ID review",
+    status: duplicateResponseIds.groups > 0 ? "warning" : "ok",
+    detail:
+      duplicateResponseIds.groups > 0
+        ? `${fmtInt(duplicateResponseIds.groups)} duplicate Response ID group(s) affect ${fmtInt(duplicateResponseIds.affectedRows)} non-identical cleaned rows. Every occurrence is highlighted amber in both XLSX outputs for manual review.`
+        : `No repeated non-blank Response ID remains after exact-row deduplication.`,
+    samples: duplicateResponseIds.issues.slice(0, MAX_SAMPLES).map(({ value }) => value),
+    issueLabel: duplicateResponseIds.groups > 0 ? "Response ID" : undefined,
+    issues: duplicateResponseIds.groups > 0 ? duplicateResponseIds.issues : undefined,
+  })
+  checks.push({
+    label: "Duplicate Ecode review",
+    status: duplicateEcodes.groups > 0 ? "warning" : "ok",
+    detail:
+      duplicateEcodes.groups > 0
+        ? `${fmtInt(duplicateEcodes.groups)} duplicate anonymized Ecode group(s) affect ${fmtInt(duplicateEcodes.affectedRows)} non-identical cleaned rows. Every occurrence is highlighted amber in both XLSX outputs for manual review.`
+        : `No repeated non-blank Ecode remains after exact-row deduplication.`,
+    samples: duplicateEcodes.issues.slice(0, MAX_SAMPLES).map(({ value }) => value),
+    issueLabel: duplicateEcodes.groups > 0 ? "Anonymized Ecode" : undefined,
+    issues: duplicateEcodes.groups > 0 ? duplicateEcodes.issues : undefined,
+  })
 
   // Mapping lookup checks
   checks.push(summarizeLookup("Department mapping", deptMap.size, mappingAudits.dept))
@@ -1285,6 +1418,11 @@ export async function runPipeline(files: PipelineFiles): Promise<PipelineResult>
       surveyOnlyCount,
       eiOnlyCount,
       beyondBainMatched,
+      exactDuplicateRowsRemoved: deduplicated.removed,
+      duplicateResponseIdGroups: duplicateResponseIds.groups,
+      duplicateResponseIdRows: duplicateResponseIds.affectedRows,
+      duplicateEcodeGroups: duplicateEcodes.groups,
+      duplicateEcodeRows: duplicateEcodes.affectedRows,
       totalColumns,
     },
     warnings,
@@ -1343,6 +1481,14 @@ export async function rowsToXLSX(rows: Row[]): Promise<Buffer> {
   ws.views = [{ state: "frozen", ySplit: 1 }] // keep header visible while scrolling
 
   const highlightCols = HIGHLIGHT_COLS.filter((c) => seen.has(c))
+  // Exact copies have already been removed. Any repeated identifier now points
+  // to non-identical records that require manual review.
+  const duplicateResponseIds = seen.has(RESPONSE_ID_COL)
+    ? analyzeDuplicateValues(rows, RESPONSE_ID_COL).values
+    : new Set<string>()
+  const duplicateEcodes = seen.has(COLS.ECODE)
+    ? analyzeDuplicateValues(rows, COLS.ECODE).values
+    : new Set<string>()
 
   for (const r of rows) {
     const values: Record<string, string | number> = {}
@@ -1359,6 +1505,23 @@ export async function rowsToXLSX(rows: Row[]): Promise<Buffer> {
           pattern: "solid",
           fgColor: { argb: "FFFFEB3B" }, // yellow
         }
+      }
+    }
+    // Highlight every occurrence of a repeated Response ID / Ecode amber.
+    const responseId = String(r[RESPONSE_ID_COL] ?? "").trim()
+    if (responseId && duplicateResponseIds.has(responseId)) {
+      added.getCell(RESPONSE_ID_COL).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF4B183" }, // amber: duplicate review
+      }
+    }
+    const ecode = String(r[COLS.ECODE] ?? "").trim()
+    if (ecode && duplicateEcodes.has(ecode)) {
+      added.getCell(COLS.ECODE).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF4B183" }, // amber: duplicate review
       }
     }
   }

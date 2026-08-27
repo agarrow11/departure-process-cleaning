@@ -53,6 +53,8 @@ const ruleRows = [
   ["Beyond Bain", "Function (ZID4_117)", "If several functions are separated by semicolons, retain only the first trimmed function.", "BB_Function (ZID4_117) + BB_Mapped Role Function", "Blank/null remains blank."],
   ["Beyond Bain", "Ecode", "Left-enrich the merged population; first Beyond Bain record per standardized Ecode wins.", "Eight BB_ fields only", "No match produces blank BB_ fields."],
   ["Final assembly", "TRUE / FALSE strings", "Normalize SheetJS uppercase boolean strings to Python-style True / False.", "Same field", "Other text is unchanged."],
+  ["Final assembly", "Complete 183-column row", "Compare every cleaned and merged field before anonymization. Keep the first exact row and remove later identical copies.", "Deduplicated full population", "A hard validation stops the run if any exact full-row duplicate survives."],
+  ["Final assembly", "Response ID + Ecode", "After exact-row deduplication, retain non-identical rows sharing either identifier and flag every occurrence for manual review.", "Amber cells in both XLSX outputs", "Blank identifiers are ignored; CSV carries the same rows but cannot carry highlighting."],
   ["Final assembly", "Ecode", "Every unique non-blank Ecode receives one random five-digit code (10000–99999); repeated rows reuse that code. A hard reconciliation compares full/no-PII rows and the mapping before files are emitted.", "Ecode + separate mapping file", "Blank stays blank and is excluded from unique counts. The run stops unless output code sets, unique originals, and mapping rows agree exactly."],
   ["PII-redacted exports", "Eight name/email fields", "Remove the exact eight approved PII columns after all joins and mappings are complete.", "Eight headers and their values are absent from no-PII files", "Full XLSX retains these fields; Ecode is anonymized in every output."],
   ["PII-redacted exports", "Seven fixed-schema contact fields", "Retain each header in its original position but clear every value.", "Headers remain in the 175-column no-PII schema; contents are blank", "A hard check stops export if a header is absent, reordered, removed, or populated."],
@@ -246,8 +248,8 @@ export default function ProcessGuidePage() {
           <section id="outputs" className="guide-section">
             <SectionHeading kicker="08 · Deliverables" title="The four files produced after each successful run" />
             <div className="guide-output-list">
-              <div><FileSpreadsheet /><span>01</span><h3>Full output .xlsx</h3><p>Current full schema (183 columns in verified test data). Includes the eight name/email fields but uses anonymized five-digit Ecode. Unresolved mapped cells are highlighted yellow.</p><strong>Restricted use</strong></div>
-              <div><FileSpreadsheet /><span>02</span><h3>_no_pii.xlsx</h3><p>Same rows and processing, with eight listed columns removed and seven additional PII columns retained but blank. The fixed schema remains 175 columns and keeps yellow unresolved-lookup highlighting.</p><strong>Preferred sharing copy</strong></div>
+              <div><FileSpreadsheet /><span>01</span><h3>Full output .xlsx</h3><p>Fixed 183-column schema. Includes the eight name/email fields but uses anonymized five-digit Ecode. Yellow marks unresolved lookups; amber marks every repeated Response ID or Ecode retained for manual review.</p><strong>Restricted use</strong></div>
+              <div><FileSpreadsheet /><span>02</span><h3>_no_pii.xlsx</h3><p>Same deduplicated rows, with eight listed columns removed and seven additional PII columns retained but blank. The fixed 175-column schema uses the same yellow and amber review highlights.</p><strong>Preferred sharing copy</strong></div>
               <div><FileSpreadsheet /><span>03</span><h3>_no_pii.csv</h3><p>CSV twin of the no-PII workbook: the same fixed 175-column structure, including the seven retained headers with blank values. CSV cannot carry cell highlighting.</p><strong>Preferred data-feed copy</strong></div>
               <div><KeyRound /><span>04</span><h3>_ecode_mapping.csv</h3><p>Two columns: Anonymized Code and Original Ecode. This is the only output designed to reverse anonymization.</p><strong>Highest access restriction</strong></div>
             </div>
@@ -258,7 +260,7 @@ export default function ProcessGuidePage() {
             <SectionHeading kicker="09 · Controls" title="Operator and handoff checklist" />
             <div className="guide-check-columns">
               <div><h3>Before running</h3><label><input type="checkbox" /> Correct seven files and reporting cycle</label><label><input type="checkbox" /> Required sheets/keys retained</label><label><input type="checkbox" /> Files open and are not password-protected</label><label><input type="checkbox" /> Authorized workspace and operator</label></div>
-              <div><h3>After running</h3><label><input type="checkbox" /> Row and source counts are plausible</label><label><input type="checkbox" /> Unmatched mappings reviewed</label><label><input type="checkbox" /> Duplicate-key audit reviewed</label><label><input type="checkbox" /> Four downloads available</label></div>
+              <div><h3>After running</h3><label><input type="checkbox" /> Exact rows removed count reviewed</label><label><input type="checkbox" /> Amber Response ID / Ecode groups manually reviewed</label><label><input type="checkbox" /> Unmatched mappings reviewed</label><label><input type="checkbox" /> Four downloads available</label></div>
               <div><h3>Before sharing</h3><label><input type="checkbox" /> Recipient needs selected format</label><label><input type="checkbox" /> No-PII copy used by default</label><label><input type="checkbox" /> Mapping key sent separately, if authorized</label><label><input type="checkbox" /> Retention/deletion date recorded</label></div>
             </div>
           </section>
@@ -269,9 +271,10 @@ export default function ProcessGuidePage() {
               <details open><summary>Run button is disabled</summary><p>At least one required file slot is empty. Confirm all four inputs and all three mappings are present.</p></details>
               <details><summary>Header row is empty or columns look shifted</summary><p>Survey and Exit Interview readers expect headers on Excel row 2 and data after the row-3 metadata line. Re-export from the source; do not manually move rows without change approval.</p></details>
               <details><summary>Many mapped fields are blank</summary><p>Review key fields for spelling, whitespace and source-period mismatches. The process intentionally leaves unmatched results blank rather than inventing a mapping.</p></details>
-              <details><summary>Population row count is higher than expected</summary><p>Inspect duplicate Ecode audits. Duplicate keys on both sides create a many-to-many cross product; the tool preserves rather than collapses these records.</p></details>
+              <details><summary>Population row count is higher than expected</summary><p>Inspect the duplicate reviews. Exact copies are removed, but non-identical records sharing Response ID or Ecode remain because they may represent separate responses or a many-to-many join.</p></details>
+              <details><summary>What do yellow and amber cells mean?</summary><p>Yellow is an unresolved mapped field. Amber is a repeated non-blank Response ID or anonymized Ecode on non-identical rows; review every row in that duplicate group before sharing.</p></details>
               <details><summary>Two reruns produce different anonymized codes</summary><p>Expected. Five-digit codes are randomly allocated per run. Never compare codes across runs without each run’s own mapping file.</p></details>
-              <details><summary>The CSV has no yellow cells</summary><p>Expected. CSV stores values only. Use the XLSX output to see unresolved mapped values highlighted in yellow.</p></details>
+              <details><summary>The CSV has no colored cells</summary><p>Expected. CSV stores values only. Use either XLSX output to see yellow unresolved mappings and amber duplicate-identifier review flags.</p></details>
             </div>
           </section>
 
@@ -289,6 +292,8 @@ export default function ProcessGuidePage() {
                   <tr><td><code>fullOuterJoin</code></td><td>Survey/EI reconciliation, source precedence, one-sided retention, duplicate-key cross products.</td></tr>
                   <tr><td><code>applyBeyondBainLogic</code></td><td>First-function cleaning and mapped-role derivation before enrichment.</td></tr>
                   <tr><td><code>BB_ALLOWLIST</code></td><td>Defines the only eight Beyond Bain fields allowed into the output.</td></tr>
+                  <tr><td><code>deduplicateExactRows / validateNoExactDuplicates</code></td><td>Complete-row deduplication in fixed column order, first occurrence retained, plus a hard no-survivor gate.</td></tr>
+                  <tr><td><code>analyzeDuplicateValues / rowsToXLSX</code></td><td>Counts remaining Response ID/Ecode duplicate groups and applies amber review fills to every occurrence in both workbooks.</td></tr>
                   <tr><td><code>anonymizeEcodes</code></td><td>Random unique five-digit code assignment and reversible mapping-table creation.</td></tr>
                   <tr><td><code>PII_COLUMNS / PII_COLUMNS_TO_CLEAR / stripPIIColumns</code></td><td>Two-part no-PII contract: remove eight approved columns, retain seven fixed-schema headers with blank contents.</td></tr>
                   <tr><td><code>validatePIIRedaction</code></td><td>Hard export gate confirming the 175-column order, required retained headers, and blank values in every retained PII field.</td></tr>

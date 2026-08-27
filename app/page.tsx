@@ -23,6 +23,11 @@ interface PipelineStats {
   surveyOnlyCount: number
   eiOnlyCount: number
   beyondBainMatched: number
+  exactDuplicateRowsRemoved: number
+  duplicateResponseIdGroups: number
+  duplicateResponseIdRows: number
+  duplicateEcodeGroups: number
+  duplicateEcodeRows: number
   totalColumns: number
 }
 
