@@ -145,6 +145,15 @@ const COLS = {
   PD_SENIORITY: "Seniority", // → Mapped Seniority
   PD_LEVEL: "Employee Level", // → Mapped Employee Level
   PD_POSITION: "CPH_3", // → Mapped Position
+
+  // "How did you learn about your new job?" was restructured from a 7-option
+  // multi-select (still present in Old Survey / earlier New Survey exports)
+  // into a single-select field. The single answer is folded back into the
+  // original 7 option columns on load so the fixed schema does not widen for
+  // this question — see foldJobSourceSelectedChoice.
+  JOB_SOURCE_SELECTED_CHOICE: "How did you learn about your new job? - Selected Choice",
+  JOB_SOURCE_OPTION_PREFIX:
+    "How did you learn about your new job? (select all that apply) - Selected Choice - ",
 }
 
 /**
@@ -417,6 +426,59 @@ function buildPositionedRows(
 const INPUT_FILE_HEADER_ROW = 1
 
 /**
+ * The 7 original "How did you learn about your new job?" multi-select
+ * options, in their original column order. Must match the Old Survey /
+ * earlier New Survey headers exactly.
+ */
+const JOB_SOURCE_OPTIONS = [
+  "Bain internal connection (office/department leadership team, colleague, Global Coaching, Bain Executive Network)",
+  "Bain external connection (Bain alum)",
+  "Bain alumni job board",
+  "Family/friend",
+  "LinkedIn",
+  "Executive Recruiter/Search Firm (please specify)",
+  "Other (please specify)",
+]
+
+/**
+ * Fold a restructured single-select "How did you learn about your new job? -
+ * Selected Choice" field back into the 7 original multi-select option
+ * columns, so the fixed schema does not widen for this question and rows
+ * from either survey shape line up under the same 7 headers.
+ *
+ * No-op (returns the same columns, untouched) for any row set that doesn't
+ * carry the single-select field — i.e. Old Survey or an earlier New Survey
+ * export, which already populate the option columns directly.
+ */
+function foldJobSourceSelectedChoice(
+  rows: Row[],
+  columns: string[],
+  refLabel: string,
+  warnings: string[],
+): string[] {
+  if (!columns.includes(COLS.JOB_SOURCE_SELECTED_CHOICE)) return columns
+  const optionCols = JOB_SOURCE_OPTIONS.map((o) => COLS.JOB_SOURCE_OPTION_PREFIX + o)
+  let unmatched = 0
+  for (const row of rows) {
+    const rawSelected = row[COLS.JOB_SOURCE_SELECTED_CHOICE]
+    const selectedText = isBlank(rawSelected) ? "" : String(rawSelected).trim()
+    const matchIndex = selectedText ? JOB_SOURCE_OPTIONS.indexOf(selectedText) : -1
+    if (selectedText && matchIndex === -1) unmatched++
+    optionCols.forEach((col, i) => {
+      row[col] = i === matchIndex ? rawSelected : null
+    })
+    delete row[COLS.JOB_SOURCE_SELECTED_CHOICE]
+  }
+  if (unmatched > 0) {
+    warnings.push(
+      `${refLabel}: ${fmtInt(unmatched)} row(s) had a "How did you learn about your new job?" value that ` +
+        `did not match any of the 7 known options — recorded in none of the option columns. Check for a new option text.`,
+    )
+  }
+  return [...columns.filter((c) => c !== COLS.JOB_SOURCE_SELECTED_CHOICE), ...optionCols.filter((c) => !columns.includes(c))]
+}
+
+/**
  * Load survey file.
  * - Sheet detected automatically (handles date-stamped tab names).
  * - Header pinned to row 2; the row-3 metadata/blank line is always skipped.
@@ -434,7 +496,7 @@ function loadSurvey(
     warnings,
     INPUT_FILE_HEADER_ROW,
   )
-  const { rows: positioned, columns } = buildPositionedRows(matrix, headerRow, refLabel, warnings)
+  const { rows: positioned, columns: rawColumns } = buildPositionedRows(matrix, headerRow, refLabel, warnings)
   const rows = positioned.map(({ row, excelRow }) => ({
     ...row,
     [COLS.ECODE]: standardizeEcode(row[COLS.ECODE]),
@@ -443,6 +505,7 @@ function loadSurvey(
     _srcFile: refLabel,
     _srcRow: excelRow,
   }))
+  const columns = foldJobSourceSelectedChoice(rows, rawColumns, refLabel, warnings)
   return { rows, columns }
 }
 
