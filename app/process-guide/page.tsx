@@ -53,11 +53,11 @@ const ruleRows = [
   ["Beyond Bain", "Function (ZID4_117)", "If several functions are separated by semicolons, retain only the first trimmed function.", "BB_Function (ZID4_117) + BB_Mapped Role Function", "Blank/null remains blank."],
   ["Beyond Bain", "Ecode", "Left-enrich the merged population; first Beyond Bain record per standardized Ecode wins.", "Eight BB_ fields only", "No match produces blank BB_ fields."],
   ["Final assembly", "TRUE / FALSE strings", "Normalize SheetJS uppercase boolean strings to Python-style True / False.", "Same field", "Other text is unchanged."],
-  ["Final assembly", "Complete 183-column row", "Compare every cleaned and merged field before anonymization. Keep the first exact row and remove later identical copies.", "Deduplicated full population", "A hard validation stops the run if any exact full-row duplicate survives."],
+  ["Final assembly", "Complete assembled row", "Compare every cleaned and merged field before anonymization, across the full column set for that run. Keep the first exact row and remove later identical copies.", "Deduplicated full population", "A hard validation stops the run if any exact full-row duplicate survives. Total column count is not hardcoded: it is the union of columns actually present in the Old and New Survey files for that run, so it changes if a survey instrument adds or removes questions."],
   ["Final assembly", "Response ID + Ecode", "After exact-row deduplication, retain non-identical rows sharing either identifier and flag every occurrence for manual review.", "Amber cells in both XLSX outputs", "Blank identifiers are ignored; CSV carries the same rows but cannot carry highlighting."],
   ["Final assembly", "Ecode", "Every unique non-blank Ecode receives one random five-digit code (10000–99999); repeated rows reuse that code. A hard reconciliation compares full/no-PII rows and the mapping before files are emitted.", "Ecode + separate mapping file", "Blank stays blank and is excluded from unique counts. The run stops unless output code sets, unique originals, and mapping rows agree exactly."],
   ["PII-redacted exports", "Eight name/email fields", "Remove the exact eight approved PII columns after all joins and mappings are complete.", "Eight headers and their values are absent from no-PII files", "Full XLSX retains these fields; Ecode is anonymized in every output."],
-  ["PII-redacted exports", "Seven fixed-schema contact fields", "Retain each header in its original position but clear every value.", "Headers remain in the 175-column no-PII schema; contents are blank", "A hard check stops export if a header is absent, reordered, removed, or populated."],
+  ["PII-redacted exports", "Seven fixed-schema contact fields", "Retain each header in its original position but clear every value.", "Headers remain in the no-PII schema at the same relative position; contents are blank", "A hard check stops export if a header is absent, reordered, removed, or populated. This is independent of total column count."],
 ] as const
 
 const piiColumns = [
@@ -215,7 +215,7 @@ export default function ProcessGuidePage() {
             <ol className="guide-column-list">{piiColumns.map((column, index) => <li key={column}><span>{String(index + 1).padStart(2, "0")}</span><code>{column}</code></li>)}</ol>
             <h3>The seven headers retained with blank contents in no-PII files</h3>
             <ol className="guide-column-list">{retainedBlankPIIColumns.map((column, index) => <li key={column}><span>{String(index + 1).padStart(2, "0")}</span><code>{column}</code></li>)}</ol>
-            <p className="guide-caption">The no-PII schema remains fixed at 175 columns: the prior eight columns stay removed, while these seven remain in their original positions with empty values. The interviewer-entered Employee Ecode field is different: it is deleted upstream from every output, before the final schema is assembled.</p>
+            <p className="guide-caption">What is fixed is not a specific total column count — it is which headers are removed and which are retained-but-blank. The prior eight columns stay removed, and these seven remain in their original positions with empty values, regardless of how many other columns a given run's Old and New Survey files contribute. If a survey instrument adds or removes questions, total column count changes accordingly; these fifteen PII-related columns do not. The interviewer-entered Employee Ecode field is different: it is deleted upstream from every output, before the final schema is assembled.</p>
           </section>
 
           <section id="merge" className="guide-section">
@@ -248,9 +248,9 @@ export default function ProcessGuidePage() {
           <section id="outputs" className="guide-section">
             <SectionHeading kicker="08 · Deliverables" title="The four files produced after each successful run" />
             <div className="guide-output-list">
-              <div><FileSpreadsheet /><span>01</span><h3>Full output .xlsx</h3><p>Fixed 183-column schema. Includes the eight name/email fields but uses anonymized five-digit Ecode. Yellow marks unresolved lookups; amber marks every repeated Response ID or Ecode retained for manual review.</p><strong>Restricted use</strong></div>
-              <div><FileSpreadsheet /><span>02</span><h3>_no_pii.xlsx</h3><p>Same deduplicated rows, with eight listed columns removed and seven additional PII columns retained but blank. The fixed 175-column schema uses the same yellow and amber review highlights.</p><strong>Preferred sharing copy</strong></div>
-              <div><FileSpreadsheet /><span>03</span><h3>_no_pii.csv</h3><p>CSV twin of the no-PII workbook: the same fixed 175-column structure, including the seven retained headers with blank values. CSV cannot carry cell highlighting.</p><strong>Preferred data-feed copy</strong></div>
+              <div><FileSpreadsheet /><span>01</span><h3>Full output .xlsx</h3><p>Column count tracks the current Old + New Survey column set for that run. Includes the eight name/email fields but uses anonymized five-digit Ecode. Yellow marks unresolved lookups; amber marks every repeated Response ID or Ecode retained for manual review.</p><strong>Restricted use</strong></div>
+              <div><FileSpreadsheet /><span>02</span><h3>_no_pii.xlsx</h3><p>Same deduplicated rows, with eight listed columns removed and seven additional PII columns retained but blank. Total width follows the full output; the same yellow and amber review highlights apply.</p><strong>Preferred sharing copy</strong></div>
+              <div><FileSpreadsheet /><span>03</span><h3>_no_pii.csv</h3><p>CSV twin of the no-PII workbook: the same structure and column order, including the seven retained headers with blank values. CSV cannot carry cell highlighting.</p><strong>Preferred data-feed copy</strong></div>
               <div><KeyRound /><span>04</span><h3>_ecode_mapping.csv</h3><p>Two columns: Anonymized Code and Original Ecode. This is the only output designed to reverse anonymization.</p><strong>Highest access restriction</strong></div>
             </div>
             <div className="guide-security-callout"><LockKeyhole size={22} /><div><strong>Do not co-locate distributed data and its key.</strong><p>The no-PII file plus the mapping file is re-identifiable. Apply the same controls as the original HR source data.</p></div></div>
@@ -296,7 +296,7 @@ export default function ProcessGuidePage() {
                   <tr><td><code>analyzeDuplicateValues / rowsToXLSX</code></td><td>Counts remaining Response ID/Ecode duplicate groups and applies amber review fills to every occurrence in both workbooks.</td></tr>
                   <tr><td><code>anonymizeEcodes</code></td><td>Random unique five-digit code assignment and reversible mapping-table creation.</td></tr>
                   <tr><td><code>PII_COLUMNS / PII_COLUMNS_TO_CLEAR / stripPIIColumns</code></td><td>Two-part no-PII contract: remove eight approved columns, retain seven fixed-schema headers with blank contents.</td></tr>
-                  <tr><td><code>validatePIIRedaction</code></td><td>Hard export gate confirming the 175-column order, required retained headers, and blank values in every retained PII field.</td></tr>
+                  <tr><td><code>validatePIIRedaction</code></td><td>Hard export gate confirming column order (derived from the full output, whatever its width), required retained headers, and blank values in every retained PII field.</td></tr>
                   <tr><td><code>rowsToXLSX / rowsToCSV</code></td><td>Final serialization; XLSX also highlights unresolved mapping blanks.</td></tr>
                 </tbody>
               </table>

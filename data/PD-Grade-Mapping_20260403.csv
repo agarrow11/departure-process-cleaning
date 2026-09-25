@@ -1,0 +1,241 @@
+PD Grade,Seniority,LT Seniority,Employee Level,CPH_1,CPH_2,CPH_3,CPH_4,CPH_5
+A0,No,No,6,Consulting Position,AC/SAC,AC,AC - 1Y,A0
+A1,No,No,6,Consulting Position,AC/SAC,AC,AC - 1Y,A1
+A2,No,No,6,Consulting Position,AC/SAC,AC,AC - 1Y,A2
+A3,No,No,6,Consulting Position,AC/SAC,AC,AC - 2Y,A3
+A4,No,No,6,Consulting Position,AC/SAC,AC,AC - 2Y,A4
+A5,No,No,6,Consulting Position,AC/SAC,SAC,SAC,A5
+A6,No,No,6,Consulting Position,AC/SAC,SAC,SAC,A6
+A7,No,No,6,Consulting Position,AC/SAC,SAC,SAC,A7
+A8,No,No,6,Consulting Position,AC/SAC,SAC,SAC,A8
+AS3,No,No,6,Consulting Position,AC/SAC,AC,AC - 2Y,AS3
+AS5,No,No,6,Consulting Position,AC/SAC,SAC,SAC,AS5
+AS6,No,No,6,Consulting Position,AC/SAC,SAC,SAC,AS6
+AS7,No,No,6,Consulting Position,AC/SAC,SAC,SAC,AS7
+B1,No,No,2,Other,Other,Other,Other,Other
+B2,No,No,4,Other,Other,Other,Other,Other
+B3,No,No,6,Other,Other,Other,Other,Other
+B3A,No,No,4,Other,Other,Other,Other,Other
+B3B,No,No,4,Other,Other,Other,Other,Other
+B4,No,No,6,Other,Other,Other,Other,Other
+B5,No,No,6,Other,Other,Other,Other,Other
+B6,No,No,8,Other,Other,Other,Other,Other
+B7,No,No,12,Other,Other,Other,Other,Other
+B8,No,No,14,Other,Other,Other,Other,Other
+BC10,Yes,No,10,Other,Other,Other,Other,Other
+BC11,Yes,No,11,Other,Other,Other,Other,Other
+BC12,Yes,Vice President,12,Other,Other,Other,Other,Other
+BC14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+BC4,No,No,4,Other,Other,Other,Other,Other
+BC6,No,No,6,Other,Other,Other,Other,Other
+BC8,No,No,8,Other,Other,Other,Other,Other
+BC9,No,No,9,Other,Other,Other,Other,Other
+BE10,Yes,No,10,Other,Other,Other,Other,Other
+BE11,Yes,No,11,Other,Other,Other,Other,Other
+BE12,Yes,Vice President,12,Other,Other,Other,Other,Other
+BE14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+BE6,No,No,6,Other,Other,Other,Other,Other
+BE8,No,No,8,Other,Other,Other,Other,Other
+BE9,No,No,9,Other,Other,Other,Other,Other
+BN10,Yes,No,10,Other,Other,Other,Other,Other
+BN11,Yes,No,11,Other,Other,Other,Other,Other
+BN12,Yes,Vice President,12,Other,Other,Other,Other,Other
+BN14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+BN9,No,No,9,Other,Other,Other,Other,Other
+C0,No,No,8,Consulting Position,C/M,Consultant,C - 1Y,C0
+C1,No,No,8,Consulting Position,C/M,Consultant,C - 1Y,C1
+C2,No,No,8,Consulting Position,C/M,Consultant,C - 1Y,C2
+C3,No,No,8,Consulting Position,C/M,Consultant,C - 2Y,C3
+C4,No,No,8,Consulting Position,C/M,Consultant,C - 2Y,C4
+C5,No,No,9,Consulting Position,C/M,Manager,M,C5
+C6,No,No,9,Consulting Position,C/M,Manager,M,C6
+C7,No,No,9,Consulting Position,C/M,Manager,M,C7
+C8,No,No,9,Consulting Position,C/M,Manager,M,C8
+C9,No,No,10,Consulting Position,C/M,Manager,M,C9
+CT10,Yes,No,10,Other,Other,Other,Other,Other
+CT11,Yes,No,11,Other,Other,Other,Other,Other
+CT12,Yes,Vice President,12,Other,Other,Other,Other,Other
+CT14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+CT6,No,No,6,Other,Other,Other,Other,Other
+CT8,No,No,8,Other,Other,Other,Other,Other
+CT9,No,No,9,Other,Other,Other,Other,Other
+D1,No,No,2,Other,Other,Other,Other,Other
+D2,No,No,4,Other,Other,Other,Other,Other
+D3,No,No,6,Other,Other,Other,Other,Other
+D4,No,No,6,Other,Other,Other,Other,Other
+D5,No,No,8,Other,Other,Other,Other,Other
+D6,No,No,10,Other,Other,Other,Other,Other
+D7,No,No,12,Other,Other,Other,Other,Other
+EC6,No,No,6,Consulting Position,C/M,Manager,M,EC6
+EC8,No,No,8,Consulting Position,C/M,Manager,M,EC8
+EC9,No,No,9,Consulting Position,C/M,Manager,M,EC9
+EM1,Yes,No,10,Consulting Position,SMAP,SM,SM - 1Y,EM1
+EM2,Yes,No,10,Consulting Position,SMAP,SM,SM - 1Y,EM2
+EM3,Yes,No,10,Consulting Position,SMAP,SM,SM - 2Y+,EM3
+EM4,Yes,No,10,Consulting Position,SMAP,SM,SM - 2Y+,EM4
+EM5,Yes,No,10,Consulting Position,SMAP,SM,SM - 2Y+,EM5
+EM6,Yes,No,11,Consulting Position,SMAP,AP,AP - 1Y,EM6
+EM7,Yes,No,11,Consulting Position,SMAP,AP,AP - 1Y,EM7
+EM8,Yes,No,11,Consulting Position,SMAP,AP,AP - 2Y+,EM8
+EM9,Yes,No,11,Consulting Position,SMAP,AP,AP - 2Y+,EM9
+EV1,Yes,Expert Partner / Executive VP,14,Consulting Position,Partner,Partner,P,EV1
+EV3,Yes,Expert Partner / Executive VP,14,Consulting Position,Partner,Senior Partner,Sr P,EV3
+F10,Yes,No,10,Other,Other,Other,Other,Other
+F11,Yes,No,11,Other,Other,Other,Other,Other
+F12,Yes,Vice President,12,Other,Other,Other,Other,Other
+F14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+F1,No,No,1,Other,Other,Other,Other,Other
+F4,No,No,4,Other,Other,Other,Other,Other
+F6,No,No,6,Other,Other,Other,Other,Other
+F8,No,No,8,Other,Other,Other,Other,Other
+F9,No,No,9,Other,Other,Other,Other,Other
+G2,No,No,8,Other,Other,Other,Other,Other
+G4,No,No,8,Other,Other,Other,Other,Other
+G6,No,No,8,Other,Other,Other,Other,Other
+I1,No,No,2,Other,Other,Other,Other,Other
+I3,No,No,4,Other,Other,Other,Other,Other
+I4,No,No,6,Other,Other,Other,Other,Other
+I5,No,No,8,Other,Other,Other,Other,Other
+I6,Yes,No,10,Other,Other,Other,Other,Other
+I7,No,No,12,Other,Other,Other,Other,Other
+I8,No,No,14,Other,Other,Other,Other,Other
+K10,Yes,No,10,Other,Other,Other,Other,Other
+K11,Yes,No,11,Other,Other,Other,Other,Other
+K12,Yes,Vice President,12,Other,Other,Other,Other,Other
+K14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+K6,No,No,6,Other,Other,Other,Other,Other
+K8,No,No,8,Other,Other,Other,Other,Other
+K9,No,No,9,Other,Other,Other,Other,Other
+L2,No,No,2,Other,Other,Other,Other,Other
+L3,No,No,6,Other,Other,Other,Other,Other
+L4,No,No,8,Other,Other,Other,Other,Other
+L5,No,No,8,Other,Other,Other,Other,Other
+L8,No,No,14,Other,Other,Other,Other,Other
+M1,Yes,No,10,Consulting Position,SMAP,SM,SM - 1Y,M1
+M2,Yes,No,10,Consulting Position,SMAP,SM,SM - 1Y,M2
+M3,Yes,No,10,Consulting Position,SMAP,SM,SM - 2Y+,M3
+M4,Yes,No,10,Consulting Position,SMAP,SM,SM - 2Y+,M4
+M5,Yes,No,10,Consulting Position,SMAP,SM,SM - 2Y+,M5
+M6,Yes,No,11,Consulting Position,SMAP,AP,AP - 1Y,M6
+M7,Yes,No,11,Consulting Position,SMAP,AP,AP - 1Y,M7
+M8,Yes,No,11,Consulting Position,SMAP,AP,AP - 2Y+,M8
+M9,Yes,No,11,Consulting Position,SMAP,AP,AP - 2Y+,M9
+M10,Yes,No,11,Consulting Position,SMAP,AP,AP - 2Y+,M10
+MT10,Yes,No,10,Other,Other,Other,Other,Other
+MT12,Yes,Vice President,12,Other,Other,Other,Other,Other
+MT14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+MT6,No,No,6,Other,Other,Other,Other,Other
+MT8,No,No,8,Other,Other,Other,Other,Other
+MT9,No,No,9,Other,Other,Other,Other,Other
+N1,No,No,1,Other,Other,Other,Other,Other
+N10,Yes,No,10,Other,Other,Other,Other,Other
+N11,Yes,No,11,Other,Other,Other,Other,Other
+N12,Yes,Vice President,12,Other,Other,Other,Other,Other
+N14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+N2,No,No,2,Other,Other,Other,Other,Other
+N3,No,No,4,Other,Other,Other,Other,Other
+N4,No,No,4,Other,Other,Other,Other,Other
+N5,No,No,6,Other,Other,Other,Other,Other
+N6,No,No,6,Other,Other,Other,Other,Other
+N7,No,No,8,Other,Other,Other,Other,Other
+N8,No,No,8,Other,Other,Other,Other,Other
+N9,No,No,9,Other,Other,Other,Other,Other
+NS10,Yes,No,10,Other,Other,Other,Other,Other
+NS11,Yes,No,11,Other,Other,Other,Other,Other
+NS12,Yes,Vice President,12,Other,Other,Other,Other,Other
+NS14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+NS6,No,No,6,Other,Other,Other,Other,Other
+NS8,No,No,8,Other,Other,Other,Other,Other
+NS9,No,No,9,Other,Other,Other,Other,Other
+O10,Yes,No,10,Other,Other,Other,Other,Other
+P1,No,No,4,Other,Other,Other,Other,Other
+P2,No,No,4,Other,Other,Other,Other,Other
+P3,No,No,6,Other,Other,Other,Other,Other
+P4,No,No,6,Other,Other,Other,Other,Other
+QB4,No,No,4,Other,Other,Other,Other,Other
+QB6,No,No,6,Other,Other,Other,Other,Other
+QB8,No,No,8,Other,Other,Other,Other,Other
+QB9,No,No,9,Other,Other,Other,Other,Other
+QC1,No,No,8,Other,Other,Other,Other,Other
+QC2,No,No,8,Other,Other,Other,Other,Other
+QE1,Yes,No,11,Other,Other,Other,Other,Other
+QG1,No,No,6,Other,Other,Other,Other,Other
+QG2,No,No,6,Other,Other,Other,Other,Other
+QG3,No,No,8,Other,Other,Other,Other,Other
+QG4,No,No,9,Other,Other,Other,Other,Other
+QJ1,No,No,6,Other,Other,Other,Other,Other
+QM1,Yes,No,9,Consulting Position,SMAP,SM,SM - 1Y,QM1
+QS1,No,No,1,Other,Other,Other,Other,Other
+QT1,No,No,1,Other,Other,Other,Other,Other
+QT14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+QT2,No,No,6,Other,Other,Other,Other,Other
+QT3,No,No,8,Other,Other,Other,Other,Other
+QT4,No,No,9,Other,Other,Other,Other,Other
+QT5,Yes,No,11,Other,Other,Other,Other,Other
+S1,No,No,1,Consulting Position,Intern,Summer Associate,SA,S1
+S2,No,No,1,Consulting Position,Intern,AC Intern,ACI,S2
+S3,No,No,1,Consulting Position,Intern,Other,Other,S3
+S4,No,No,1,Consulting Position,Intern,Other,Other,S4
+S6,No,No,1,Consulting Position,Intern,Other,Other,S6
+SC1,No,No,8,Consulting Position,C/M,Consultant,C - 1Y,SC1
+SC2,No,No,8,Consulting Position,C/M,Consultant,C - 1Y,SC2
+SC3,No,No,8,Consulting Position,C/M,Consultant,C - 2Y,SC3
+SC4,No,No,8,Consulting Position,C/M,Consultant,C - 2Y,SC4
+SC5,No,No,9,Consulting Position,C/M,Manager,M,SC5
+SC6,No,No,9,Consulting Position,C/M,Manager,M,SC6
+SC7,No,No,9,Consulting Position,C/M,Manager,M,SC7
+SM1,Yes,No,10,Consulting Position,SMAP,SM,SM - 1Y,SM1
+SM2,Yes,No,10,Consulting Position,SMAP,SM,SM - 1Y,SM2
+SM3,Yes,No,10,Consulting Position,SMAP,SM,SM - 2Y+,SM3
+T1,No,No,4,Other,Other,Other,Other,Other
+T2,No,No,2,Other,Other,Other,Other,Other
+T3,No,No,6,Other,Other,Other,Other,Other
+T4,No,No,8,Other,Other,Other,Other,Other
+T5,No,No,8,Other,Other,Other,Other,Other
+TD1,No,No,1,Other,Other,Other,Other,Other
+TD10,Yes,No,10,Other,Other,Other,Other,Other
+TD11,Yes,No,11,Other,Other,Other,Other,Other
+TD12,Yes,Vice President,12,Other,Other,Other,Other,Other
+TD14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+TD6,No,No,6,Other,Other,Other,Other,Other
+TD8,No,No,8,Other,Other,Other,Other,Other
+TD9,No,No,9,Other,Other,Other,Other,Other
+TE10,Yes,No,10,Other,Other,Other,Other,Other
+TE11,Yes,No,11,Other,Other,Other,Other,Other
+TE12,Yes,Vice President,12,Other,Other,Other,Other,Other
+TE14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+TE6,No,No,6,Other,Other,Other,Other,Other
+TE8,No,No,8,Other,Other,Other,Other,Other
+TE9,No,No,9,Other,Other,Other,Other,Other
+TG1,No,No,1,Other,Other,Other,Other,Other
+TG10,Yes,No,10,Other,Other,Other,Other,Other
+TG11,Yes,No,11,Other,Other,Other,Other,Other
+TG12,Yes,Vice President,12,Other,Other,Other,Other,Other
+TG14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+TG4,No,No,4,Other,Other,Other,Other,Other
+TG6,No,No,6,Other,Other,Other,Other,Other
+TG8,No,No,8,Other,Other,Other,Other,Other
+TG9,No,No,9,Other,Other,Other,Other,Other
+TT1,No,No,1,Other,Other,Other,Other,Other
+TT10,Yes,No,10,Other,Other,Other,Other,Other
+TT11,Yes,No,11,Other,Other,Other,Other,Other
+TT12,Yes,Vice President,12,Other,Other,Other,Other,Other
+TT14,Yes,Expert Partner / Executive VP,14,Other,Other,Other,Other,Other
+TT6,No,No,6,Other,Other,Other,Other,Other
+TT8,No,No,8,Other,Other,Other,Other,Other
+TT9,No,No,9,Other,Other,Other,Other,Other
+U1,Yes,No,299,Consulting Position,Partner,Senior Advisor,Sr Adv,U1
+U3,Yes,No,300,Consulting Position,Partner,Senior Advisor,Sr Adv,U3
+V1,Yes,Partner,14,Consulting Position,Partner,Partner,P,V1
+V3,Yes,Senior Partner,14,Consulting Position,Partner,Senior Partner,Sr P,V3
+V6,Yes,Senior Partner,14,Consulting Position,Partner,Senior Partner,Sr P,V6
+V7,Yes,Advisory Partner,14,Consulting Position,Partner,Advisory Partner,Adv P,V7
+W1,No,No,1,Other,Other,Other,Other,Other
+W2,No,No,2,Other,Other,Other,Other,Other
+W3,No,No,6,Other,Other,Other,Other,Other
+W4,No,No,4,Other,Other,Other,Other,Other
+W5,No,No,8,Other,Other,Other,Other,Other
+W6,No,No,8,Other,Other,Other,Other,Other
+W7,No,No,12,Other,Other,Other,Other,Other
+W8,No,No,12,Other,Other,Other,Other,Other
+W9,No,No,14,Other,Other,Other,Other,Other
