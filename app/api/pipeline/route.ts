@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { runPipeline, rowsToXLSX, rowsToCSV } from "@/lib/pipeline"
+import { runPipeline, rowsToXLSX, rowsToCSV, stripPIIColumns, validateEcodeIntegrity, validatePIIRedaction } from "@/lib/pipeline"
 
 export const runtime = "nodejs" // Required: pipeline uses Node Buffer APIs
 export const maxDuration = 300   // 5 min — large files may take time
@@ -43,11 +43,22 @@ export async function POST(request: NextRequest) {
 
     // ── Generate XLSX output ──────────────────────────────────────────────
     const xlsxBuffer = await rowsToXLSX(result.rows)
-    const csvString  = rowsToCSV(result.rows)
+    // Ecode anonymization mapping (traceability): original Ecode ↔ 5-digit code.
+    const mappingCsv = rowsToCSV(result.ecodeMap)
+    // PII-redacted variants: remove 8 approved columns and retain 7 fixed-schema
+    // headers with blank values. Re-run both hard reconciliations at the file-
+    // production boundary so future route changes cannot emit invalid files.
+    const redactedRows = stripPIIColumns(result.rows)
+    validatePIIRedaction(result.rows, redactedRows)
+    validateEcodeIntegrity(result.rows, redactedRows, result.ecodeMap)
+    const xlsxRedactedBuffer = await rowsToXLSX(redactedRows)
+    const csvRedactedString  = rowsToCSV(redactedRows)
 
     // Encode outputs as base64 to return in JSON alongside stats
     const xlsxBase64 = Buffer.from(xlsxBuffer).toString("base64")
-    const csvBase64  = Buffer.from(csvString).toString("base64")
+    const mappingBase64 = Buffer.from(mappingCsv).toString("base64")
+    const xlsxRedactedBase64 = Buffer.from(xlsxRedactedBuffer).toString("base64")
+    const csvRedactedBase64  = Buffer.from(csvRedactedString).toString("base64")
 
     return NextResponse.json({
       success: true,
@@ -55,7 +66,9 @@ export async function POST(request: NextRequest) {
       warnings: result.warnings,
       audit: result.audit,
       xlsx: xlsxBase64,
-      csv: csvBase64,
+      ecodeMap: mappingBase64,
+      xlsxRedacted: xlsxRedactedBase64,
+      csvRedacted: csvRedactedBase64,
     })
 
   } catch (err: unknown) {
