@@ -61,13 +61,10 @@ interface AuditReport {
 
 interface PipelineResponse {
   success: boolean
+  resultId: string
   stats: PipelineStats
   warnings: string[]
   audit: AuditReport
-  xlsx: string
-  ecodeMap: string
-  xlsxRedacted: string
-  csvRedacted: string
   error?: string
 }
 
@@ -125,13 +122,6 @@ const FILE_SLOTS: FileSlot[] = [
 ]
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-function base64ToBlob(base64: string, mimeType: string): Blob {
-  const binary = atob(base64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return new Blob([bytes], { type: mimeType })
-}
-
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement("a")
@@ -182,11 +172,30 @@ export default function PipelinePage() {
       }
 
       const res = await fetch("/api/pipeline", { method: "POST", body: fd })
-      const data: PipelineResponse = await res.json()
+
+      // Read as text first: an intermediary (proxy, platform size limit, etc.)
+      // can return a non-JSON error body (e.g. a plain-text "Request Entity
+      // Too Large" page) even though this route always returns JSON itself.
+      // Calling res.json() directly on that throws a confusing
+      // "Unexpected token ... is not valid JSON" with no indication of what
+      // actually went wrong.
+      const rawBody = await res.text()
+      let data: PipelineResponse
+      try {
+        data = JSON.parse(rawBody)
+      } catch {
+        setStatus("error")
+        setErrorMsg(
+          !res.ok
+            ? `Server returned ${res.status} ${res.statusText}: ${rawBody.slice(0, 200) || "(empty response)"}`
+            : `Server returned a non-JSON response: ${rawBody.slice(0, 200)}`
+        )
+        return
+      }
 
       if (!res.ok || !data.success) {
         setStatus("error")
-        setErrorMsg(data.error ?? "Unknown error")
+        setErrorMsg(data.error ?? `Server returned ${res.status} ${res.statusText}`)
         return
       }
 
@@ -198,29 +207,28 @@ export default function PipelinePage() {
     }
   }
 
-  const handleDownloadXLSX = () => {
+  const downloadResultFile = async (type: "xlsx" | "xlsxRedacted" | "ecodeMap" | "csvRedacted", filename: string) => {
     if (!result) return
-    const blob = base64ToBlob(result.xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    downloadBlob(blob, `${exportBaseName()}.xlsx`)
+    const res = await fetch(`/api/pipeline/download?id=${result.resultId}&type=${type}`)
+    if (!res.ok) {
+      const body = await res.text()
+      let message = `Download failed: ${res.status} ${res.statusText}`
+      try {
+        message = JSON.parse(body).error ?? message
+      } catch {
+        // non-JSON error body; fall back to the status-based message above
+      }
+      setErrorMsg(message)
+      setStatus("error")
+      return
+    }
+    downloadBlob(await res.blob(), filename)
   }
 
-  const handleDownloadMapping = () => {
-    if (!result) return
-    const blob = base64ToBlob(result.ecodeMap, "text/csv")
-    downloadBlob(blob, `${exportBaseName()}_ecode_mapping.csv`)
-  }
-
-  const handleDownloadXLSXRedacted = () => {
-    if (!result) return
-    const blob = base64ToBlob(result.xlsxRedacted, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    downloadBlob(blob, `${exportBaseName()}_no_pii.xlsx`)
-  }
-
-  const handleDownloadCSVRedacted = () => {
-    if (!result) return
-    const blob = base64ToBlob(result.csvRedacted, "text/csv")
-    downloadBlob(blob, `${exportBaseName()}_no_pii.csv`)
-  }
+  const handleDownloadXLSX = () => downloadResultFile("xlsx", `${exportBaseName()}.xlsx`)
+  const handleDownloadMapping = () => downloadResultFile("ecodeMap", `${exportBaseName()}_ecode_mapping.csv`)
+  const handleDownloadXLSXRedacted = () => downloadResultFile("xlsxRedacted", `${exportBaseName()}_no_pii.xlsx`)
+  const handleDownloadCSVRedacted = () => downloadResultFile("csvRedacted", `${exportBaseName()}_no_pii.csv`)
 
   return (
     <div style={{ minHeight: "100vh", background: "#f5f5f0", fontFamily: "Arial, Helvetica, sans-serif" }}>
